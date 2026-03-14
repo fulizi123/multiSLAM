@@ -30,6 +30,8 @@ namespace LL_SLAM
         void InsertFrame(Frame *pCurrentFrame) ;
 
         void CreateNewKeyFrame(Frame *pCurrentFrame) ;
+        void MapPointCulling(KeyFrame *pCurrentKF);
+        void KeyFrameCulling(KeyFrame *pCurrentKF);
 
 
         vector<Frame *> mvpFrame;

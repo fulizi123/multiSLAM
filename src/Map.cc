@@ -1,5 +1,6 @@
 
 #include "Map.h"
+#include <algorithm>
 
 
 namespace LL_SLAM
@@ -10,6 +11,7 @@ namespace LL_SLAM
     }
 
     void Map::AddKeyFrame(KeyFrame *pKF) {
+        unique_lock<mutex> lock(mMutexUpdate);
         mvpKFObservations.push_back(pKF);
         mspKFObservations.insert(pKF);
 
@@ -18,6 +20,7 @@ namespace LL_SLAM
 
 
     void Map::AddMapPoint(MapPoint *pMP) {
+        unique_lock<mutex> lock(mMutexUpdate);
         mvpMPObservations.push_back(pMP);
         mspMPObservations.insert(pMP);
 
@@ -27,25 +30,55 @@ namespace LL_SLAM
 
 
     KeyFrame* Map::GetLastKeyFrame(){
+        unique_lock<mutex> lock(mMutexUpdate);
         if (mvpKFObservations.empty()) {return NULL;}
         return mvpKFObservations.back();
     }
 
-    void Map::UpdateLocalMap() {
-
-//        mvpLocalKF = mvpKFObservations;
-//        mvpLocalMP = mvpMPObservations;
-
+    void Map::UpdateLocalMap(KeyFrame *pReferenceKF) {
+        unique_lock<mutex> lock(mMutexUpdate);
         mvpLocalKF.clear();
         mvpLocalMP.clear();
-        mvpLocalKF.reserve(5);
-        int nMaxLocalKF = 5;
-//        for (int KFi = max(int(mvpKFObservations.size() - nMaxLocalKF), 0); KFi < mvpKFObservations.size(); KFi++) {
-//            mvpLocalKF.push_back(mvpKFObservations[KFi]);
-//        }
-        for (int KFi = mvpKFObservations.size() - 1; KFi >= max(int(mvpKFObservations.size() - nMaxLocalKF), 0); KFi--) {
-            mvpLocalKF.push_back(mvpKFObservations[KFi]);
+        if (pReferenceKF == nullptr) {
+            if (!mvpKFObservations.empty()) {
+                pReferenceKF = mvpKFObservations.back();
+            }
         }
+        if (pReferenceKF == nullptr) {
+            return;
+        }
+
+        const int nMaxCovisibleKF = 10;
+        const int nMinLocalKF = 5;
+
+        vector<KeyFrame*> vCandidates;
+        vCandidates.push_back(pReferenceKF);
+        vector<KeyFrame*> vBestCovisibility = pReferenceKF->GetBestCovisibilityKeyFrames(nMaxCovisibleKF);
+        vCandidates.insert(vCandidates.end(), vBestCovisibility.begin(), vBestCovisibility.end());
+
+        unordered_set<KeyFrame*> usLocalKF;
+        usLocalKF.reserve(vCandidates.size() + nMinLocalKF);
+        for (KeyFrame *pKF : vCandidates) {
+            if (pKF == nullptr || pKF->isBad()) {
+                continue;
+            }
+            usLocalKF.insert(pKF);
+        }
+
+        for (int KFi = int(mvpKFObservations.size()) - 1; KFi >= 0 && usLocalKF.size() < nMinLocalKF; KFi--) {
+            KeyFrame *pKF = mvpKFObservations[KFi];
+            if (pKF == nullptr || pKF->isBad()) {
+                continue;
+            }
+            usLocalKF.insert(pKF);
+        }
+
+        mvpLocalKF.reserve(usLocalKF.size());
+        for (KeyFrame *pKF : usLocalKF) {
+            mvpLocalKF.push_back(pKF);
+        }
+        sort(mvpLocalKF.begin(), mvpLocalKF.end(),
+             [](KeyFrame *lhs, KeyFrame *rhs) { return lhs->mnId > rhs->mnId; });
 
         unordered_set<MapPoint*> umMapPoints;
         for (int KFi = 0; KFi < mvpLocalKF.size(); KFi++) {
@@ -53,10 +86,11 @@ namespace LL_SLAM
 
             for (int cam_i = 0; cam_i < pKF->mvMapPoints.size(); cam_i++) {
                 for (int kpi = 0; kpi < pKF->mvMapPoints[cam_i].size(); kpi++) {
-                    if (pKF->mvMapPoints[cam_i][kpi] == NULL) {
+                    MapPoint *pMP = pKF->mvMapPoints[cam_i][kpi];
+                    if (pMP == NULL || pMP->isBad()) {
                         continue;
                     }
-                    umMapPoints.insert(pKF->mvMapPoints[cam_i][kpi]);
+                    umMapPoints.insert(pMP);
                 }
             }
         }
@@ -66,8 +100,6 @@ namespace LL_SLAM
             mvpLocalMP.push_back(it);
         }
         return ;
-
-
     }
 
     vector<KeyFrame*> Map::GetLocalKeyFrame() {

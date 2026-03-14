@@ -37,6 +37,7 @@ namespace LL_SLAM
     class Optimizer {
     public:
         int static PoseOptimization(Frame* pFrame);
+        int static LocalBundleAdjustment(KeyFrame* pKF, Map* pMap);
 
     };
 

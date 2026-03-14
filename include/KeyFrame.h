@@ -19,12 +19,23 @@ namespace LL_SLAM
         KeyFrame(Frame *pFrame);
 
         void AddObservation(MapPoint *pMP, int cam_i, int KeyPoint_i);
+        void EraseObservation(int cam_i, int KeyPoint_i);
 
         void SetPose(const Eigen::Matrix4f &Tbw) ;
         Eigen::Matrix4f GetPose() const ;
         Eigen::Matrix4f GetTwb() const ;
         Eigen::Matrix3f GetRwb() const ;
         Eigen::Vector3f Gettwb() const ;
+
+        void AddConnection(KeyFrame *pKF, int weight);
+        void EraseConnection(KeyFrame *pKF);
+        void UpdateConnections();
+        vector<KeyFrame*> GetConnectedKeyFrames();
+        vector<KeyFrame*> GetBestCovisibilityKeyFrames(int N);
+        int GetWeight(KeyFrame *pKF);
+
+        void SetBadFlag();
+        bool isBad() const;
 
         Frame *mpFrame;
         System* mpSystem;
@@ -61,6 +72,11 @@ namespace LL_SLAM
 
         Eigen::Matrix4f mTbw;
         Eigen::Matrix4f mTwb;
+        map<KeyFrame*, int> mConnectedKeyFrameWeights;
+        vector<KeyFrame*> mvpOrderedConnectedKeyFrames;
+        vector<int> mvOrderedWeights;
+        mutable std::mutex mMutexConnections;
+        bool mbBad = false;
     };
 
 }

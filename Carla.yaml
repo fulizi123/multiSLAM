@@ -5,12 +5,13 @@
 #--------------------------------------------------------------------------------------------
 Camera.type: "PinHole"
 
-SequencePath: "/data/code/carla/20260114_1947_dataset"
+# SequencePath: "/data/code/carla/20260114_1947_dataset"
+SequencePath: "/data/code/carla/dataset_nusc_0307_1704_carla"
 # SequencePath: "/media/flag/T7/Carla_Dataset/0000"
 
 
 SequenceBegin: 0
-SequenceEnd: 100
+SequenceEnd: 400
 
 SpeedUp: 0.5
 ##"distortion": [-0.3121, 0.1024, 0.00032953, -0.00039793, -0.0158]}

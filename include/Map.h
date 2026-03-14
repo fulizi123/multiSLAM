@@ -25,7 +25,7 @@ namespace LL_SLAM
 
         KeyFrame *GetLastKeyFrame();
 
-        void UpdateLocalMap();
+        void UpdateLocalMap(KeyFrame *pReferenceKF = nullptr);
 
         vector<KeyFrame*> GetLocalKeyFrame();
 

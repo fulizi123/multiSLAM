@@ -72,9 +72,8 @@ namespace LL_SLAM
     }
 
     void Tracking::Track() {
-        unique_lock<mutex> lock1(mpMap->mMutexUpdate);
-        unique_lock<mutex> lock2(mpSystem->mMutexUpdate);
-        unique_lock<mutex> lock3(mMutexUpdate);
+        unique_lock<mutex> lockSystem(mpSystem->mMutexUpdate);
+        unique_lock<mutex> lockTracking(mMutexUpdate);
 
         if (mState == NO_IMAGES_YET) {
             mState = NOT_INITIALIZED;
@@ -159,11 +158,12 @@ namespace LL_SLAM
             }
         }
 
+        pKF->UpdateConnections();
 
         //mpReferenceKF
         mpReferenceKF = pKF;
 
-        mpMap->UpdateLocalMap();
+        mpMap->UpdateLocalMap(pKF);
 
         return ;
 
@@ -171,23 +171,23 @@ namespace LL_SLAM
 
     bool Tracking::TrackWithMotionModel() {
         FeatureMatcher matcher(0.8,true);
-//
-        set<MapPoint*> spLocalMP;
-        for (int i = 0; i < mpReferenceKF->mvMapPoints.size(); i++) {
-            for (int j = 0; j < mpReferenceKF->mvMapPoints[i].size(); j++) {
-                if (mpReferenceKF->mvMapPoints[i][j] == NULL) {continue;}
-                //sometimes the map point are newed but never add to map.
-                if (mpReferenceKF->mvMapPoints[i][j]->mDescriptor.empty()) {continue;}
-                spLocalMP.insert(mpReferenceKF->mvMapPoints[i][j]);
+        vector<MapPoint*> vpLocalMP = mpMap->GetLocalMapPoint();
+        if (vpLocalMP.empty() && mpReferenceKF != nullptr) {
+            set<MapPoint*> spLocalMP;
+            for (int i = 0; i < int(mpReferenceKF->mvMapPoints.size()); i++) {
+                for (int j = 0; j < int(mpReferenceKF->mvMapPoints[i].size()); j++) {
+                    MapPoint *pMP = mpReferenceKF->mvMapPoints[i][j];
+                    if (pMP == NULL || pMP->isBad()) {continue;}
+                    if (pMP->mDescriptor.empty()) {continue;}
+                    spLocalMP.insert(pMP);
+                }
+            }
+
+            vpLocalMP.reserve(spLocalMP.size());
+            for (auto it : spLocalMP) {
+                vpLocalMP.push_back(it);
             }
         }
-
-        vector<MapPoint*> vpLocalMP;
-        vpLocalMP.reserve(spLocalMP.size());
-        for (auto it : spLocalMP) {
-            vpLocalMP.push_back(it);
-        }
-//        vector<MapPoint*> vpLocalMP = mpMap->GetLocalMapPoint();
 
         std::vector<std::vector<MapPoint*>> vpMapPointMatches;
 
@@ -263,7 +263,7 @@ namespace LL_SLAM
 //        if ((mpCurrentFrame->mTimeStamp - mpReferenceKF->mTimeStamp)>=3.0) {
 //            return true;
 //        }
-        if (mpCurrentFrame->mnId % 30 == 0) {
+        if (mpCurrentFrame->mnId %20 == 0) {
             return true;
         }
 

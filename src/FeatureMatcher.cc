@@ -941,8 +941,11 @@ namespace LL_SLAM
 //        std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
 //        /////////////////
         int dist=0;
-        if (a.empty() || a.empty()) {
-            cout << "a b empty" << endl;
+        if (a.empty() || b.empty()) {
+            return 256;
+        }
+        if (a.type() != b.type() || a.rows != b.rows || a.cols != b.cols) {
+            return 256;
         }
         if (a.type() == CV_8U) {
             const int *pa = a.ptr<int32_t>();

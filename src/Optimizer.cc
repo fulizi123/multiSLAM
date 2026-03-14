@@ -1,9 +1,59 @@
 
 #include "Optimizer.h"
 
+#include <unordered_set>
+
 
 namespace LL_SLAM
 {
+
+    namespace
+    {
+        g2o::VertexSE3ExpmapMultiCamera* CreatePoseVertex(int id, const Eigen::Matrix4f &TbwInput, bool fixed)
+        {
+            g2o::VertexSE3ExpmapMultiCamera *vSE3 = new g2o::VertexSE3ExpmapMultiCamera();
+
+            Eigen::Matrix4d TbwEigen = TbwInput.cast<double>();
+            Eigen::Quaterniond rotation(TbwEigen.block<3, 3>(0, 0));
+            rotation.normalize();
+            TbwEigen.block<3, 3>(0, 0) = rotation.toRotationMatrix();
+
+            Sophus::SE3<double> Tbw(TbwEigen);
+            vSE3->setEstimate(g2o::SE3Quat(Tbw.unit_quaternion(), Tbw.translation()));
+            vSE3->setId(id);
+            vSE3->setFixed(fixed);
+
+            return vSE3;
+        }
+
+        double GetObservationInvSigma2(KeyFrame *pKF, int cam_i, const cv::KeyPoint &kp)
+        {
+            if (pKF == nullptr) {
+                return 1.0;
+            }
+            double scaleFactor = 1.0;
+            cv::FileNode node = pKF->mSettings["FeatureExtractor.scaleFactor"];
+            if (!node.empty()) {
+                scaleFactor = (double)node.real();
+            }
+            if (scaleFactor <= 1.0 || kp.octave <= 0) {
+                return 1.0;
+            }
+            return 1.0 / std::pow(scaleFactor, 2.0 * kp.octave);
+        }
+
+        void ConfigureMonoEdge(g2o::EdgeSE3ProjectXYZMultiCamera *e, KeyFrame *pKF, int cam_i, const cv::KeyPoint &kpUn)
+        {
+            Eigen::Matrix3f KCam = pKF->mvK_cams[cam_i];
+            e->setK(KCam(0, 0), KCam(1, 1), KCam(0, 2), KCam(1, 2));
+            e->setTcb(pKF->mvTbc_cams[cam_i].inverse().cast<double>());
+            e->setInformation(Eigen::Matrix2d::Identity() * GetObservationInvSigma2(pKF, cam_i, kpUn));
+
+            g2o::RobustKernelHuber *rk = new g2o::RobustKernelHuber;
+            rk->setDelta(std::sqrt(5.991));
+            e->setRobustKernel(rk);
+        }
+    }
 
 //    int Optimizer::PoseOptimization(Frame *pFrame){
 //
@@ -261,6 +311,214 @@ namespace LL_SLAM
 
 
         return optimizer.edges().size();
+    }
+
+    int Optimizer::LocalBundleAdjustment(KeyFrame *pKF, Map *pMap)
+    {
+        if (pKF == nullptr || pMap == nullptr || pKF->isBad()) {
+            return 0;
+        }
+
+        const int kMaxOptimizableKFs = 4;
+        const int kMaxFixedKFs = 10;
+        unordered_set<KeyFrame*> usActiveLocalKFs;
+        vector<KeyFrame*> vpOptimizableKFs;
+        vpOptimizableKFs.reserve(kMaxOptimizableKFs);
+
+        vector<KeyFrame*> vpCovisibleKFs = pKF->GetBestCovisibilityKeyFrames(kMaxOptimizableKFs);
+        for (KeyFrame *pLocalKF : vpCovisibleKFs) {
+            if (pLocalKF == nullptr || pLocalKF->isBad() || usActiveLocalKFs.count(pLocalKF) > 0) {
+                continue;
+            }
+            usActiveLocalKFs.insert(pLocalKF);
+            vpOptimizableKFs.push_back(pLocalKF);
+        }
+
+        if (vpOptimizableKFs.size() < 2) {
+            vector<KeyFrame*> vpFallbackKFs = pMap->GetLocalKeyFrame();
+            for (KeyFrame *pLocalKF : vpFallbackKFs) {
+                if (int(vpOptimizableKFs.size()) >= kMaxOptimizableKFs) {
+                    break;
+                }
+                if (pLocalKF == nullptr || pLocalKF->isBad() || pLocalKF == pKF || usActiveLocalKFs.count(pLocalKF) > 0) {
+                    continue;
+                }
+                usActiveLocalKFs.insert(pLocalKF);
+                vpOptimizableKFs.push_back(pLocalKF);
+            }
+        }
+        usActiveLocalKFs.insert(pKF);
+
+        unordered_set<MapPoint*> usLocalMPs;
+        vector<MapPoint*> vpOptimizableMPs;
+        vector<KeyFrame*> vpPointSourceKFs;
+        vpPointSourceKFs.reserve(vpOptimizableKFs.size() + 1);
+        vpPointSourceKFs.push_back(pKF);
+        vpPointSourceKFs.insert(vpPointSourceKFs.end(), vpOptimizableKFs.begin(), vpOptimizableKFs.end());
+
+        for (KeyFrame *pLocalKF : vpPointSourceKFs) {
+            for (int cam_i = 0; cam_i < int(pLocalKF->mvMapPoints.size()); cam_i++) {
+                for (int kpi = 0; kpi < int(pLocalKF->mvMapPoints[cam_i].size()); kpi++) {
+                    MapPoint *pMP = pLocalKF->mvMapPoints[cam_i][kpi];
+                    if (pMP == nullptr || pMP->isBad() || pMP->KeyFrameObservations() <= 0) {
+                        continue;
+                    }
+                    if (!usLocalMPs.insert(pMP).second) {
+                        continue;
+                    }
+                    vpOptimizableMPs.push_back(pMP);
+                }
+            }
+        }
+        if (vpOptimizableMPs.empty()) {
+            return 0;
+        }
+
+        map<KeyFrame*, int> fixedKFcounter;
+        for (MapPoint *pMP : vpOptimizableMPs) {
+            vector<pair<KeyFrame*,std::pair<int,int>>> vObservations = pMP->GetObservations();
+            for (const auto &obs : vObservations) {
+                KeyFrame *pObsKF = obs.first;
+                if (pObsKF == nullptr || pObsKF->isBad() || usActiveLocalKFs.count(pObsKF) > 0) {
+                    continue;
+                }
+                fixedKFcounter[pObsKF]++;
+            }
+        }
+
+        vector<pair<int, KeyFrame*>> vFixedKFsSorted;
+        vFixedKFsSorted.reserve(fixedKFcounter.size());
+        for (auto &it : fixedKFcounter) {
+            vFixedKFsSorted.push_back({it.second, it.first});
+        }
+        sort(vFixedKFsSorted.begin(), vFixedKFsSorted.end(),
+             [](const pair<int, KeyFrame*> &lhs, const pair<int, KeyFrame*> &rhs) {
+                 if (lhs.first != rhs.first) {
+                     return lhs.first > rhs.first;
+                 }
+                 return lhs.second->mnId > rhs.second->mnId;
+             });
+
+        vector<KeyFrame*> vpFixedKFs;
+        vpFixedKFs.reserve(min(int(vFixedKFsSorted.size()), kMaxFixedKFs));
+        for (const auto &it : vFixedKFsSorted) {
+            if (int(vpFixedKFs.size()) >= kMaxFixedKFs) {
+                break;
+            }
+            vpFixedKFs.push_back(it.second);
+        }
+
+        g2o::SparseOptimizer optimizer;
+        g2o::BlockSolver_6_3::LinearSolverType *linearSolver;
+        linearSolver = new g2o::LinearSolverEigen<g2o::BlockSolver_6_3::PoseMatrixType>();
+        g2o::BlockSolver_6_3 *solverPtr = new g2o::BlockSolver_6_3(linearSolver);
+        g2o::OptimizationAlgorithmLevenberg *solver = new g2o::OptimizationAlgorithmLevenberg(solverPtr);
+        optimizer.setAlgorithm(solver);
+        optimizer.setVerbose(false);
+
+        unordered_map<KeyFrame*, int> dictKF2Index;
+        unordered_map<MapPoint*, int> dictMP2Index;
+        int nextVertexId = 0;
+
+        g2o::VertexSE3ExpmapMultiCamera *vCurrentKF = CreatePoseVertex(nextVertexId, pKF->GetPose(), true);
+        optimizer.addVertex(vCurrentKF);
+        dictKF2Index[pKF] = nextVertexId++;
+
+        for (KeyFrame *pLocalKF : vpOptimizableKFs) {
+            g2o::VertexSE3ExpmapMultiCamera *vSE3 = CreatePoseVertex(nextVertexId, pLocalKF->GetPose(), false);
+            optimizer.addVertex(vSE3);
+            dictKF2Index[pLocalKF] = nextVertexId++;
+        }
+
+        for (KeyFrame *pFixedKF : vpFixedKFs) {
+            if (pFixedKF == nullptr || pFixedKF->isBad() || dictKF2Index.find(pFixedKF) != dictKF2Index.end()) {
+                continue;
+            }
+            g2o::VertexSE3ExpmapMultiCamera *vSE3 = CreatePoseVertex(nextVertexId, pFixedKF->GetPose(), true);
+            optimizer.addVertex(vSE3);
+            dictKF2Index[pFixedKF] = nextVertexId++;
+        }
+
+        for (MapPoint *pMP : vpOptimizableMPs) {
+            g2o::VertexSBAPointXYZ *vPoint = new g2o::VertexSBAPointXYZ();
+            vPoint->setEstimate(pMP->GetWorldPos().cast<double>());
+            vPoint->setId(nextVertexId);
+            vPoint->setMarginalized(true);
+            vPoint->setFixed(false);
+            optimizer.addVertex(vPoint);
+            dictMP2Index[pMP] = nextVertexId++;
+        }
+
+        int nEdges = 0;
+        for (MapPoint *pMP : vpOptimizableMPs) {
+            auto itPoint = dictMP2Index.find(pMP);
+            if (itPoint == dictMP2Index.end()) {
+                continue;
+            }
+
+            vector<pair<KeyFrame*,std::pair<int,int>>> vObservations = pMP->GetObservations();
+            for (const auto &obsInfo : vObservations) {
+                KeyFrame *pObsKF = obsInfo.first;
+                auto itKF = dictKF2Index.find(pObsKF);
+                if (pObsKF == nullptr || pObsKF->isBad() || itKF == dictKF2Index.end()) {
+                    continue;
+                }
+
+                const int cam_i = obsInfo.second.first;
+                const int kpi = obsInfo.second.second;
+                if (cam_i < 0 || cam_i >= int(pObsKF->mvCamKeysUn.size())) {
+                    continue;
+                }
+                if (kpi < 0 || kpi >= int(pObsKF->mvCamKeysUn[cam_i].size())) {
+                    continue;
+                }
+
+                const cv::KeyPoint &kpUn = pObsKF->mvCamKeysUn[cam_i][kpi];
+                Eigen::Matrix<double,2,1> obs;
+                obs << kpUn.pt.x, kpUn.pt.y;
+
+                g2o::EdgeSE3ProjectXYZMultiCamera *e = new g2o::EdgeSE3ProjectXYZMultiCamera();
+                e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(itPoint->second)));
+                e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(itKF->second)));
+                e->setMeasurement(obs);
+                ConfigureMonoEdge(e, pObsKF, cam_i, kpUn);
+                optimizer.addEdge(e);
+                nEdges++;
+            }
+        }
+
+        if (nEdges < 10) {
+            return nEdges;
+        }
+
+        optimizer.initializeOptimization();
+        optimizer.optimize(10);
+
+        for (KeyFrame *pLocalKF : vpOptimizableKFs) {
+            auto itKF = dictKF2Index.find(pLocalKF);
+            if (itKF == dictKF2Index.end()) {
+                continue;
+            }
+            auto *vSE3 = static_cast<g2o::VertexSE3ExpmapMultiCamera*>(optimizer.vertex(itKF->second));
+            g2o::SE3Quat se3QuatRecov = vSE3->estimate();
+            Sophus::SE3<float> pose(se3QuatRecov.rotation().cast<float>(),
+                                    se3QuatRecov.translation().cast<float>());
+            pLocalKF->SetPose(pose.matrix());
+            if (pLocalKF->mpFrame != nullptr) {
+                pLocalKF->mpFrame->SetPose(pose.matrix());
+            }
+        }
+
+        for (MapPoint *pMP : vpOptimizableMPs) {
+            auto itPoint = dictMP2Index.find(pMP);
+            if (itPoint == dictMP2Index.end()) {
+                continue;
+            }
+            auto *vPoint = static_cast<g2o::VertexSBAPointXYZ*>(optimizer.vertex(itPoint->second));
+            pMP->SetWorldPos(vPoint->estimate().cast<float>());
+        }
+
+        return nEdges;
     }
 
 
