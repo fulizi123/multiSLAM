@@ -22,6 +22,8 @@ namespace LL_SLAM
         System(const cv::FileStorage Settings,
                       int NumCam = 0, vector<Eigen::Matrix4f> Tbc_cams = {}, vector<Eigen::Matrix3f> K_cams = {}    );
 
+        void Shutdown();
+
         Eigen::Matrix4f TrackMultiCamera(const vector<cv::Mat> &vImCams, const double &timestamp,
                                          vector<vector<vector<int>>> * pvKeyPoints, vector<vector<vector<float>>> * pvDescriptor);
 

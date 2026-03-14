@@ -64,4 +64,19 @@ namespace LL_SLAM
         return Tcw;
     }
 
+    void System::Shutdown() {
+        if (mpViewer != nullptr) {
+            mpViewer->RequestFinish();
+        }
+        if (mptViewer != nullptr) {
+            mptViewer->join();
+            delete mptViewer;
+            mptViewer = nullptr;
+        }
+        if (mpViewer != nullptr) {
+            delete mpViewer;
+            mpViewer = nullptr;
+        }
+    }
+
 } //namespace ORB_SLAM

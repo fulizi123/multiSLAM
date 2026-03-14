@@ -1,6 +1,6 @@
 file(REMOVE_RECURSE
-  "../../../Thirdparty/g2o/lib/libg2o.pdb"
-  "../../../Thirdparty/g2o/lib/libg2o.so"
+  "/data/code/LL_SLAM_MultiCamera/Thirdparty/g2o/lib/libg2o.pdb"
+  "/data/code/LL_SLAM_MultiCamera/Thirdparty/g2o/lib/libg2o.so"
   "CMakeFiles/g2o.dir/g2o/core/batch_stats.cpp.o"
   "CMakeFiles/g2o.dir/g2o/core/batch_stats.cpp.o.d"
   "CMakeFiles/g2o.dir/g2o/core/cache.cpp.o"

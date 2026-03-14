@@ -5,13 +5,14 @@
 #--------------------------------------------------------------------------------------------
 Camera.type: "PinHole"
 
-SequencePath: "/media/flag/T7/Dataset/0000/"
+SequencePath: "/data/code/carla/20260114_1947_dataset"
+# SequencePath: "/media/flag/T7/Carla_Dataset/0000"
 
 
 SequenceBegin: 0
-SequenceEnd: 1000
+SequenceEnd: 100
 
-SpeedUp: 1
+SpeedUp: 0.5
 ##"distortion": [-0.3121, 0.1024, 0.00032953, -0.00039793, -0.0158]}
 ## Camera calibration and distortion parameters (OpenCV)
 Camera.fx: 369.504172281
@@ -53,7 +54,7 @@ ThDepth: 40.0
 
 # ORB Extractor: Number of features per image
 FeatureExtractor.FixFeatureNum: 1
-FeatureExtractor.nFeatures: 800
+FeatureExtractor.nFeatures: 1000
 #FeatureExtractor.nFeatures: 800
 
 # ORB Extractor: Scale factor between levels in the scale pyramid 	

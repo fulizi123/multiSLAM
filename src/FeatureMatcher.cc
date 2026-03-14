@@ -34,6 +34,8 @@ namespace LL_SLAM
 
     const int FeatureMatcher::TH_HIGH = 100;
     const int FeatureMatcher::TH_LOW = 50;
+    // const int FeatureMatcher::TH_HIGH = 200;
+    // const int FeatureMatcher::TH_LOW = 60;
     const int FeatureMatcher::HISTO_LENGTH = 30;
 
     FeatureMatcher::FeatureMatcher(float nnratio, bool checkOri): mfNNratio(nnratio), mbCheckOrientation(checkOri)
@@ -960,8 +962,16 @@ namespace LL_SLAM
             //score_eigen > 0.755 : dist_eigen < 0.49 : dist < 75            is good
             //score_eigen > 0.595 : dist_eigen < 0.81 : dist < 100            is almost good
             //score_eigen > 0.79 : dist_eigen < 0.42 : dist < 50             is pretty good
-            // dist =  - 256.410 * score_eigen + 252.564
             dist = max(min(int( - 256.410 * score_eigen + 252.564), 256), 0);
+
+            // 【修改开始】使用标准 L2 距离
+            // XFeat 归一化后，理论最大 L2 距离是 2.0 (sqrt(2)*sqrt(2))
+            // 我们乘以 100，把范围 [0, 2.0] 映射到整数 [0, 200]
+            // float l2_dist = cv::norm(a, b, cv::NORM_L2);
+            // dist = (int)(l2_dist * 60.0f); 
+            
+            
+
         }
 //        /////////////////
 //        std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();

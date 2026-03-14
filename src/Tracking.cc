@@ -30,6 +30,7 @@ namespace LL_SLAM
         }
 
         mpMatcher = new FeatureMatcher(0.6,true);
+        // mpMatcher = new FeatureMatcher(0.95, true);
 
         pPreFrame = NULL;
         mpCurrentFrame = NULL;

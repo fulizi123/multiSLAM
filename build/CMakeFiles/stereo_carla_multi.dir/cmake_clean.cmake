@@ -1,6 +1,6 @@
 file(REMOVE_RECURSE
-  "../Examples/stereo_carla_multi"
-  "../Examples/stereo_carla_multi.pdb"
+  "/data/code/LL_SLAM_MultiCamera/Examples/stereo_carla_multi"
+  "/data/code/LL_SLAM_MultiCamera/Examples/stereo_carla_multi.pdb"
   "CMakeFiles/stereo_carla_multi.dir/Examples/stereo_carla_multi.cc.o"
   "CMakeFiles/stereo_carla_multi.dir/Examples/stereo_carla_multi.cc.o.d"
 )

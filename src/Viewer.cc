@@ -1,17 +1,199 @@
 
 #include "Viewer.h"
 
+namespace
+{
+    cv::Mat MakePreviewImage(const cv::Mat &image, const cv::Size &targetSize)
+    {
+        cv::Mat preview;
+        if (image.channels() == 4) {
+            cv::cvtColor(image, preview, cv::COLOR_BGRA2BGR);
+        } else if (image.channels() == 1) {
+            cv::cvtColor(image, preview, cv::COLOR_GRAY2BGR);
+        } else {
+            preview = image.clone();
+        }
+
+        if (targetSize.width > 0 && targetSize.height > 0 && preview.size() != targetSize) {
+            cv::resize(preview, preview, targetSize);
+        }
+        return preview;
+    }
+
+    void CopyPreviewToCanvas(const cv::Mat &preview, cv::Mat &canvas, int x, int y)
+    {
+        int dstX = x < 0 ? 0 : x;
+        int dstY = y < 0 ? 0 : y;
+        int copyWidth = preview.cols;
+        int copyHeight = preview.rows;
+
+        if (dstX >= canvas.cols || dstY >= canvas.rows) {
+            return;
+        }
+
+        if (dstX + copyWidth > canvas.cols) {
+            copyWidth = canvas.cols - dstX;
+        }
+        if (dstY + copyHeight > canvas.rows) {
+            copyHeight = canvas.rows - dstY;
+        }
+        if (copyWidth <= 0 || copyHeight <= 0) {
+            return;
+        }
+
+        preview(cv::Rect(0, 0, copyWidth, copyHeight)).copyTo(canvas(cv::Rect(dstX, dstY, copyWidth, copyHeight)));
+    }
+
+    cv::Size GetSurroundPreviewSize(const cv::Mat &image, int canvasWidth, int canvasHeight)
+    {
+        int previewWidth = canvasWidth / 4;
+        if (previewWidth < 160) {
+            previewWidth = 160;
+        }
+
+        int previewHeight = previewWidth;
+        if (image.cols > 0 && image.rows > 0) {
+            previewHeight = previewWidth * image.rows / image.cols;
+        }
+
+        int maxPreviewHeight = canvasHeight / 5;
+        if (maxPreviewHeight < 100) {
+            maxPreviewHeight = 100;
+        }
+
+        if (previewHeight > maxPreviewHeight && previewHeight > 0) {
+            previewWidth = previewWidth * maxPreviewHeight / previewHeight;
+            previewHeight = maxPreviewHeight;
+        }
+
+        return cv::Size(previewWidth, previewHeight);
+    }
+
+    cv::Point2f ScalePointToPreview(const cv::Point2f &point, const cv::Size &sourceSize, const cv::Size &previewSize)
+    {
+        if (sourceSize.width <= 0 || sourceSize.height <= 0 || previewSize.width <= 0 || previewSize.height <= 0) {
+            return point;
+        }
+
+        float scaleX = static_cast<float>(previewSize.width) / static_cast<float>(sourceSize.width);
+        float scaleY = static_cast<float>(previewSize.height) / static_cast<float>(sourceSize.height);
+        return cv::Point2f(point.x * scaleX, point.y * scaleY);
+    }
+
+    std::vector<int> DistancetoRGB(float dis)
+    {
+        int h = int(6 * dis) % 360;
+        int s = 100;
+        int v = 100;
+
+        if (abs(dis) < 1e-6) {
+            h = 0;
+            s = 0;
+            v = 100;
+        }
+
+        if (h >= 360) h = 360;
+        if (s >= 100) s = 100;
+        if (v >= 100) v = 100;
+
+        int i;
+        int R_Color = 0;
+        int B_Color = 0;
+        int G_Color = 0;
+        i = h / 60;
+        int difs = h % 60;
+        float RGB_max = v * 2.55f;
+        float RGB_min = RGB_max * (100 - s) / 100.0f;
+        float RGB_Adj = (RGB_max - RGB_min) * difs / 60.0f;
+        switch(i)
+        {
+            case 0:
+                R_Color = RGB_max;
+                G_Color = RGB_min + RGB_Adj;
+                B_Color = RGB_min;
+                break;
+
+            case 1:
+                R_Color = RGB_max - RGB_Adj;
+                G_Color = RGB_max;
+                B_Color = RGB_min;
+                break;
+
+            case 2:
+                R_Color = RGB_min;
+                G_Color = RGB_max;
+                B_Color = RGB_min + RGB_Adj;
+                break;
+
+            case 3:
+                R_Color = RGB_min;
+                G_Color = RGB_max - RGB_Adj;
+                B_Color = RGB_max;
+                break;
+
+            case 4:
+                R_Color = RGB_min + RGB_Adj;
+                G_Color = RGB_min;
+                B_Color = RGB_max;
+                break;
+
+            default:
+                R_Color = RGB_max;
+                G_Color = RGB_min;
+                B_Color = RGB_max - RGB_Adj;
+                break;
+        }
+
+        std::vector<int> tempColor;
+        tempColor.push_back(R_Color);
+        tempColor.push_back(G_Color);
+        tempColor.push_back(B_Color);
+        return tempColor;
+    }
+}
+
 
 namespace LL_SLAM
 {
     Viewer::Viewer(System *pSystem) {
         mpSystem = pSystem;
+
+        if (mMp4LayoutMode == MP4_LAYOUT_SURROUND_8) {
+            mWidth = mSurroundWidth;
+            mHeight = mSurroundHeight;
+        } else {
+            mWidth = mSingleWidth;
+            mHeight = mSingleHeight;
+        }
+
+        cv::Size frameSize(mWidth, mHeight);
+        mVideoWriter = cv::VideoWriter("LL_SLAM_MultiCamera.mp4",
+                                       cv::VideoWriter::fourcc('m', 'p', '4', 'v'),
+                                       20,
+                                       frameSize);
+        if (!mVideoWriter.isOpened()) {
+            cout << "[Viewer] Failed to open LL_SLAM_MultiCamera.mp4 for writing." << endl;
+        }
+    }
+
+    Viewer::~Viewer() {
+        if (mVideoWriter.isOpened()) {
+            mVideoWriter.release();
+        }
+    }
+
+    void Viewer::RequestFinish() {
+        unique_lock<mutex> lock(mMutexMsg);
+        mbFinishRequested = true;
     }
 
     void Viewer::Run() {
         while (1) {
 
             if (mvvImCams.empty()) {
+                if (mbFinishRequested) {
+                    break;
+                }
                 usleep(2000);
             } else {
                 vector<cv::Mat> vImCams;
@@ -36,6 +218,7 @@ namespace LL_SLAM
 
     void Viewer::InsertFrame(const vector<cv::Mat> &vImCams, Frame *pCurrentFrame)
     {
+        // return;
 //        cout << "InsertFrame " << endl;
         unique_lock<mutex> lock(mMutexMsg);
         mvvImCams.push_back(vImCams);
@@ -51,13 +234,20 @@ namespace LL_SLAM
 
     void Viewer::Visualization(const vector<cv::Mat> &vImCams, Frame *pCurrentFrame) {
 
-        cv::Mat imShow = vImCams[0].clone();
+        cv::Size previewSize(480, 270);
+        if (mMp4LayoutMode == MP4_LAYOUT_SURROUND_8) {
+            previewSize = GetSurroundPreviewSize(vImCams[0], mWidth, mHeight);
+        }
+
+        cv::Mat imShow = MakePreviewImage(vImCams[0], previewSize);
         vector<cv::KeyPoint> vKeys = pCurrentFrame->mvCamKeysUn[0];
-        for (int i = 0; i < vKeys.size(); i++) { if (vKeys[i].octave == 0) {cv::circle(imShow, cv::Point2f(vKeys[i].pt),2,cv::Scalar(0, 255, 0),-1);} }
-//        cv::imshow("imShow", imShow);
-//        cv::resize(imShow, imShow, cv::Size(320, 180));
-        cv::resize(imShow, imShow, cv::Size(480, 270));
-//        cv::imshow("imShow", imShow);
+        cv::Size baseSourceSize = vImCams[0].size();
+        for (int i = 0; i < vKeys.size(); i++) {
+            if (vKeys[i].octave == 0) {
+                cv::Point2f previewPoint = ScalePointToPreview(vKeys[i].pt, baseSourceSize, imShow.size());
+                cv::circle(imShow, previewPoint, 2, cv::Scalar(0, 255, 0), -1);
+            }
+        }
 
 //        Eigen::Vector3f t_w_viewer = mpReferenceKF->Gettwb();
         Eigen::Vector3f t_w_viewer = pCurrentFrame->Gettwb();
@@ -65,9 +255,8 @@ namespace LL_SLAM
 
 
         ///////visual
-//        int w = 1000;
-        int w = 1000;
-        int h = 720;
+        int w = mWidth;
+        int h = mHeight;
         float fbl = 0.08;
 //        float fbl = 0.3;
         cv::Mat img_map = cv::Mat::zeros(cv::Size(w, h), CV_8UC3);
@@ -297,19 +486,73 @@ namespace LL_SLAM
 
 
         //////////////////////////////////////////////////////////////////////////
+        if (mMp4LayoutMode == MP4_LAYOUT_SURROUND_8) {
+            vector<int> vImShowIndex = {0, 1, 2, 4, 5, 7, 9, 10};
+            if (vImShowIndex.back() >= pCurrentFrame->mNumCam) {
+                vImShowIndex = {0};
+            } else if (vImCams.size() > 2 && vImShowIndex.size() >= 3 && vImCams[1].datastart == vImCams[2].datastart) {
+                vImShowIndex = {0};
+            }
 
+            vector<pair<int, int>> vImShowPos = {{0, 0},
+                                                 {int(img_map.cols * 0.5 - imShow.cols * 0.5), 0},
+                                                 {int(img_map.cols - imShow.cols), 0},
+                                                 {int(img_map.cols - imShow.cols), int(img_map.rows * 0.5 - imShow.rows * 0.5)},
+                                                 {int(img_map.cols - imShow.cols), int(img_map.rows - imShow.rows)},
+                                                 {int(img_map.cols * 0.5 - imShow.cols * 0.5), int(img_map.rows - imShow.rows)},
+                                                 {0, int(img_map.rows - imShow.rows)},
+                                                 {0, int(img_map.rows * 0.5 - imShow.rows * 0.5)}};
 
-        imShow.copyTo(img_map(cv::Rect(max(int(0), 0),
-                                       max(int(0), 0),
-                                      (min(int(imShow.cols), img_map.cols) - max(0, 0)),
-                                      (min(int(imShow.rows), img_map.rows) - max(0, 0)))));
+            for (int cami = 0; cami < vImShowIndex.size() && cami < vImShowPos.size(); cami++)
+            {
+                int CamIndex = vImShowIndex[cami];
+                if (CamIndex >= vImCams.size() || CamIndex >= pCurrentFrame->mvCamKeysUn.size() || CamIndex >= pCurrentFrame->mvMapPoints.size()) {
+                    continue;
+                }
+
+                cv::Mat imShowCami = MakePreviewImage(vImCams[CamIndex], imShow.size());
+                vector<cv::KeyPoint> vCamKeys = pCurrentFrame->mvCamKeysUn[CamIndex];
+                cv::Size cameraSourceSize = vImCams[CamIndex].size();
+                int keyCount = vCamKeys.size();
+                if (keyCount > pCurrentFrame->mvMapPoints[CamIndex].size()) {
+                    keyCount = pCurrentFrame->mvMapPoints[CamIndex].size();
+                }
+
+                for (int i = 0; i < keyCount; i++) {
+                    cv::Point2f previewPoint = ScalePointToPreview(vCamKeys[i].pt, cameraSourceSize, imShowCami.size());
+
+                    if (vCamKeys[i].octave == 0) {
+                        cv::circle(imShowCami, previewPoint, 3, cv::Scalar(0, 255, 0), -1);
+                    }
+
+                    if (pCurrentFrame->mvMapPoints[CamIndex][i] != NULL) {
+                        float maxd = 60;
+                        float centerX = imShowCami.cols * 0.5;
+                        float centerY = imShowCami.rows * 0.5;
+                        cv::Point2f point = previewPoint;
+                        float d = sqrt((point.x - centerX) * (point.x - centerX) + (point.y - centerY) * (point.y - centerY)) * maxd / (max(centerX, centerY));
+                        std::vector<int> color = DistancetoRGB(d);
+                        int ringWidth = 2;
+                        int ringMin = 4;
+                        int ringMax = ringWidth + ringMin;
+                        cv::circle(imShowCami, previewPoint, ringMax, cv::Scalar(255, 255, 255), -1);
+                        cv::circle(imShowCami, previewPoint, ringMin, cv::Scalar(color[2], color[1], color[0]), -1);
+                    }
+                }
+
+                CopyPreviewToCanvas(imShowCami, img_map, vImShowPos[cami].first, vImShowPos[cami].second);
+            }
+        } else {
+            CopyPreviewToCanvas(imShow, img_map, 0, 0);
+        }
+
+        if (mVideoWriter.isOpened()) {
+            mVideoWriter.write(img_map);
+        }
 
         // 将所有像素设置为白色（最高亮度值）
-        cv::imshow("img_map", img_map);
-//
-
-
-        cv::waitKey(2);
+        // cv::imshow("img_map", img_map);
+        // cv::waitKey(2);
     }
 
 
@@ -834,27 +1077,8 @@ namespace LL_SLAM
 
         // 将所有像素设置为白色（最高亮度值）
         cv::imshow("img_map_XY", img_map);
-//
-
-
+        
         cv::waitKey(2);
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 } //namespace ORB_SLAM

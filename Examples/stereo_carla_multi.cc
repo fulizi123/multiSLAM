@@ -32,7 +32,7 @@ using namespace std;
 
 bool b_continue_session;
 
-
+int nMaxQueueLen = 5;
 queue<vector<cv::Mat> *> qpvImCams ;
 queue<vector<vector<vector<int>>> *> qpvKeyPoints ;
 queue<vector<vector<vector<float>>> *> qpvDescriptor ;
@@ -79,7 +79,7 @@ queue<vector<vector<float>>> qDescriptor11 ;
 
 
 
-cv::Mat ImCamSample = cv::imread("/home/wab/LL_SLAM_MultiCamera/000000.png",cv::IMREAD_UNCHANGED);
+cv::Mat ImCamSample = cv::imread("/home/intelnuc/CLionProjects/LL_SLAM_MultiCamera/000000.png",cv::IMREAD_UNCHANGED);
 
 
 
@@ -104,10 +104,17 @@ void LoadSuperPoint(const string &strPathToSequence,
                 vector<string> &vstrSuperPointCam06,  vector<string> &vstrSuperPointCam07,  vector<string> &vstrSuperPointCam08,
                 vector<string> &vstrSuperPointCam09,  vector<string> &vstrSuperPointCam10,  vector<string> &vstrSuperPointCam11
                 );
+void LoadXFeatPaths(const string &strPathToSequence,
+                vector<string> &vstrXFeatCam00,  vector<string> &vstrXFeatCam01,  vector<string> &vstrXFeatCam02,
+                vector<string> &vstrXFeatCam03,  vector<string> &vstrXFeatCam04,  vector<string> &vstrXFeatCam05,
+                vector<string> &vstrXFeatCam06,  vector<string> &vstrXFeatCam07,  vector<string> &vstrXFeatCam08,
+                vector<string> &vstrXFeatCam09,  vector<string> &vstrXFeatCam10,  vector<string> &vstrXFeatCam11
+                );
 
 void getSuperPoint(std::string frameBinDir, std::vector<std::vector<int>> &vKeyPoints, std::vector<std::vector<float>> &vDescriptors){
     //return ;
-    std::vector<float> fDataBuff(2000000); // 申请空间，应足够大
+//    std::vector<float> fDataBuff(2000000); // 申请空间，应足够大
+    std::vector<float> fDataBuff(800000); // 申请空间，应足够大
     std::ifstream infile(frameBinDir.c_str(), std::ifstream::binary);
     infile.read((char*)&fDataBuff.front(), fDataBuff.size()*sizeof(float));
     int num_tx_samps = infile.gcount()/sizeof(float);
@@ -142,11 +149,13 @@ void LoadImagesMultiThread (vector<string> vstrImageCamxx, queue<cv::Mat> *qImCa
     int i = 0;
     while (i < vstrImageCamxx.size()) {
 
-        if ((*qImCamxx).size() >= 5) {
+        if ((*qImCamxx).size() >= nMaxQueueLen) {
             usleep(2000);
         } else {
+            //use 35% cpu
             cv::Mat ImCamxx = cv::imread(vstrImageCamxx[i],cv::IMREAD_UNCHANGED);
-           // cv::Mat ImCamxx = qImCamxx == &qImCam00 ? ImCamxx = cv::imread(vstrImageCamxx[i],cv::IMREAD_UNCHANGED) : ImCamSample.clone();
+            //cv::Mat ImCamxx = qImCamxx == &qImCam00 ? cv::imread(vstrImageCamxx[i],cv::IMREAD_UNCHANGED) : ImCamSample;
+            //cv::Mat ImCamxx = ImCamSample.clone();
 
             i++;
             {
@@ -157,20 +166,85 @@ void LoadImagesMultiThread (vector<string> vstrImageCamxx, queue<cv::Mat> *qImCa
     }
 }
 
+// 1. 读取单帧 XFeat bin 文件 (64维描述子)
+void getXFeat(std::string frameBinDir, std::vector<std::vector<int>> &vKeyPoints, std::vector<std::vector<float>> &vDescriptors){
+    std::ifstream infile(frameBinDir.c_str(), std::ifstream::binary);
+    if (!infile.is_open()) {
+        std::cerr << "Failed to open bin file: " << frameBinDir << std::endl;
+        return;
+    }
+
+    infile.seekg(0, std::ios::end);
+    std::streampos fileSize = infile.tellg();
+    infile.seekg(0, std::ios::beg);
+
+    std::vector<float> fDataBuff(fileSize / sizeof(float));
+    infile.read((char*)&fDataBuff.front(), fileSize);
+    infile.close();
+
+    // XFeat 特征维度配置
+    const int descDim = 64;                 
+    const int floatPerPoint = 2 + descDim;  // 66
+    
+    int N = fDataBuff.size() / floatPerPoint;
+
+    if (fDataBuff.size() % floatPerPoint != 0) {
+        // 如果报错，说明文件大小不是 66 的倍数，检查 bin 生成过程
+        std::cerr << "[XFeat Error] File size mismatch! " << frameBinDir << std::endl;
+    }
+
+    vKeyPoints.resize(N, std::vector<int>(2));
+    vDescriptors.resize(N, std::vector<float>(descDim));
+
+    for (int i = 0; i < N; i++) {
+        int baseIdx = i * floatPerPoint;
+        vKeyPoints[i][0] = (int)fDataBuff[baseIdx];
+        vKeyPoints[i][1] = (int)fDataBuff[baseIdx + 1];
+        for (int j = 0; j < descDim; j++) {
+            vDescriptors[i][j] = fDataBuff[baseIdx + 2 + j];
+        }
+    }
+}
+
+// 2. XFeat 专用多线程加载函数
+void LoadXFeatMultiThread (vector<string> vstrXFeatCamxx, queue<vector<vector<int>>>* qpvKeyPointxx, queue<vector<vector<float>>>* qpvDescriptorxx) {
+    int i = 0;
+    while (i < vstrXFeatCamxx.size()) {
+
+        if ((*qpvKeyPointxx).size() >= 5) {
+            usleep(2000);
+        } else {
+            vector<vector<int>> vKeyPointCamxx;
+            vector<vector<float>> vDescriptorCamxx;
+            
+            // 调用新的读取函数
+            getXFeat(vstrXFeatCamxx[i], vKeyPointCamxx, vDescriptorCamxx);
+            
+            i++;
+            {
+                unique_lock<mutex> lock(MutexMsg);
+                (*qpvKeyPointxx).push(vKeyPointCamxx);
+                (*qpvDescriptorxx).push(vDescriptorCamxx);
+            }
+        }
+    }
+}
+
 void LoadSuperPointMultiThread (vector<string> vstrSuperPointCamxx, queue<vector<vector<int>>>* qpvKeyPointxx, queue<vector<vector<float>>>* qpvDescriptorxx) {
     int i = 0;
     while (i < vstrSuperPointCamxx.size()) {
 
-        if ((*qpvKeyPointxx).size() >= 5) {
+        if ((*qpvKeyPointxx).size() >= nMaxQueueLen) {
             usleep(2000);
         } else {
 
             vector<vector<int>> vKeyPointCamxx;
             vector<vector<float>> vDescriptorCamxx;
+            //use 8% cpu
             getSuperPoint(vstrSuperPointCamxx[i], vKeyPointCamxx, vDescriptorCamxx);
             i++;
             {
-                unique_lock<mutex> lock(MutexMsg);
+                unique_lock<mutex> lock(MutexMsg);//我感觉图像和特征点不用放同一个锁吧
                 (*qpvKeyPointxx).push(vKeyPointCamxx);
                 (*qpvDescriptorxx).push(vDescriptorCamxx);
             }
@@ -183,10 +257,10 @@ void LoadInputMultiThread (int N) {
     int i = 0;
     while (i < N) {
 
-        if (qpvImCams.size() >= 5) {
+        if (qpvImCams.size() >= nMaxQueueLen) {
             usleep(2000);
         } else {
-
+            
             unique_lock<mutex> lock(MutexMsg);
             if (qImCam00.size() > 0 && qImCam01.size() > 0 && qImCam02.size() > 0 &&
                 qImCam03.size() > 0 && qImCam04.size() > 0 && qImCam05.size() > 0 &&
@@ -272,7 +346,6 @@ int main(int argc, char **argv)
 
 
     string YOLOModelPath = fsSettings["YOLOModelPath"];
-    string VocabularyPath = fsSettings["VocabularyPath"];
     string SequencePath = fsSettings["SequencePath"];
 
     int SequenceBegin = fsSettings["SequenceBegin"];
@@ -342,6 +415,14 @@ int main(int argc, char **argv)
 
 
 
+    if(imageScale != 1.f)
+    {
+        for (int imCami = 0; imCami < K_cams.size(); imCami++) {
+            K_cams[imCami] *= imageScale;
+        }
+
+    }
+
 
     // Retrieve paths to images
 
@@ -365,7 +446,6 @@ int main(int argc, char **argv)
                 vTimestamps, SpeedUp);
 
     // Retrieve paths to SuperPoint
-
     vector <string> vstrSuperPointCam00;
     vector <string> vstrSuperPointCam01;
     vector <string> vstrSuperPointCam02;
@@ -383,7 +463,17 @@ int main(int argc, char **argv)
                vstrSuperPointCam00,  vstrSuperPointCam01,  vstrSuperPointCam02,  vstrSuperPointCam03,  vstrSuperPointCam04,  vstrSuperPointCam05,
                vstrSuperPointCam06,  vstrSuperPointCam07,  vstrSuperPointCam08,  vstrSuperPointCam09,  vstrSuperPointCam10,  vstrSuperPointCam11);
 
-    const int nImages = vTimestamps.size();
+    // // 新建变量来存储 XFeat 的文件路径
+    // vector <string> vstrXFeatCam00, vstrXFeatCam01, vstrXFeatCam02;
+    // vector <string> vstrXFeatCam03, vstrXFeatCam04, vstrXFeatCam05;
+    // vector <string> vstrXFeatCam06, vstrXFeatCam07, vstrXFeatCam08;
+    // vector <string> vstrXFeatCam09, vstrXFeatCam10, vstrXFeatCam11;
+    // // 调用新的路径加载函数
+    // LoadXFeatPaths(SequencePath,
+    //            vstrXFeatCam00,  vstrXFeatCam01,  vstrXFeatCam02,  vstrXFeatCam03,  vstrXFeatCam04,  vstrXFeatCam05,
+    //            vstrXFeatCam06,  vstrXFeatCam07,  vstrXFeatCam08,  vstrXFeatCam09,  vstrXFeatCam10,  vstrXFeatCam11);
+
+    const int nImages = min(int(vTimestamps.size()),int(SequenceEnd));
 
     LL_SLAM::System SLAM(fsSettings, NumCam, Tbc_cams, K_cams);
 
@@ -428,6 +518,20 @@ int main(int argc, char **argv)
     std::thread *mptLoadSuperPointMultiThread10 = new thread(&LoadSuperPointMultiThread, vstrSuperPointCam10, &qKeyPoint10, &qDescriptor10);
     std::thread *mptLoadSuperPointMultiThread11 = new thread(&LoadSuperPointMultiThread, vstrSuperPointCam11, &qKeyPoint11, &qDescriptor11);
     
+    
+    // // // 启动 XFeat 加载线程 (传入上面获取的 vstrXFeatCamXX)
+    // std::thread *mptLoadXFeatThread00 = new thread(&LoadXFeatMultiThread, vstrXFeatCam00, &qKeyPoint00, &qDescriptor00);
+    // std::thread *mptLoadXFeatThread01 = new thread(&LoadXFeatMultiThread, vstrXFeatCam01, &qKeyPoint01, &qDescriptor01);
+    // std::thread *mptLoadXFeatThread02 = new thread(&LoadXFeatMultiThread, vstrXFeatCam02, &qKeyPoint02, &qDescriptor02);
+    // std::thread *mptLoadXFeatThread03 = new thread(&LoadXFeatMultiThread, vstrXFeatCam03, &qKeyPoint03, &qDescriptor03);
+    // std::thread *mptLoadXFeatThread04 = new thread(&LoadXFeatMultiThread, vstrXFeatCam04, &qKeyPoint04, &qDescriptor04);
+    // std::thread *mptLoadXFeatThread05 = new thread(&LoadXFeatMultiThread, vstrXFeatCam05, &qKeyPoint05, &qDescriptor05);
+    // std::thread *mptLoadXFeatThread06 = new thread(&LoadXFeatMultiThread, vstrXFeatCam06, &qKeyPoint06, &qDescriptor06);
+    // std::thread *mptLoadXFeatThread07 = new thread(&LoadXFeatMultiThread, vstrXFeatCam07, &qKeyPoint07, &qDescriptor07);
+    // std::thread *mptLoadXFeatThread08 = new thread(&LoadXFeatMultiThread, vstrXFeatCam08, &qKeyPoint08, &qDescriptor08);
+    // std::thread *mptLoadXFeatThread09 = new thread(&LoadXFeatMultiThread, vstrXFeatCam09, &qKeyPoint09, &qDescriptor09);
+    // std::thread *mptLoadXFeatThread10 = new thread(&LoadXFeatMultiThread, vstrXFeatCam10, &qKeyPoint10, &qDescriptor10);
+    // std::thread *mptLoadXFeatThread11 = new thread(&LoadXFeatMultiThread, vstrXFeatCam11, &qKeyPoint11, &qDescriptor11);
 
     // Main loop
     cv::Mat
@@ -435,78 +539,8 @@ int main(int argc, char **argv)
         imCam03, imCam04, imCam05,
         imCam06, imCam07, imCam08,
         imCam09, imCam10, imCam11;
-    for(int ni=max(0,SequenceBegin); ni<min(nImages,SequenceEnd); ni++)
+    for(int ni=max(0,SequenceBegin); ni<nImages; ni++)
     {
-
-//
-//        // Read left and right images from file
-//        imCam00 = cv::imread(vstrImageCam00[ni],cv::IMREAD_UNCHANGED);
-//        imCam01 = cv::imread(vstrImageCam01[ni],cv::IMREAD_UNCHANGED);
-//        imCam02 = cv::imread(vstrImageCam02[ni],cv::IMREAD_UNCHANGED);
-//        imCam03 = cv::imread(vstrImageCam03[ni],cv::IMREAD_UNCHANGED);
-//        imCam04 = cv::imread(vstrImageCam04[ni],cv::IMREAD_UNCHANGED);
-//        imCam05 = cv::imread(vstrImageCam05[ni],cv::IMREAD_UNCHANGED);
-//        imCam06 = cv::imread(vstrImageCam06[ni],cv::IMREAD_UNCHANGED);
-//        imCam07 = cv::imread(vstrImageCam07[ni],cv::IMREAD_UNCHANGED);
-//        imCam08 = cv::imread(vstrImageCam08[ni],cv::IMREAD_UNCHANGED);
-//        imCam09 = cv::imread(vstrImageCam09[ni],cv::IMREAD_UNCHANGED);
-//        imCam10 = cv::imread(vstrImageCam10[ni],cv::IMREAD_UNCHANGED);
-//        imCam11 = cv::imread(vstrImageCam11[ni],cv::IMREAD_UNCHANGED);
-//
-//        vector<vector<int>>
-//                vKeyPointCam00, vKeyPointCam01, vKeyPointCam02,
-//                vKeyPointCam03, vKeyPointCam04, vKeyPointCam05,
-//                vKeyPointCam06, vKeyPointCam07, vKeyPointCam08,
-//                vKeyPointCam09, vKeyPointCam10, vKeyPointCam11;
-//        vector<vector<float>>
-//                vDescriptorCam00, vDescriptorCam01, vDescriptorCam02,
-//                vDescriptorCam03, vDescriptorCam04, vDescriptorCam05,
-//                vDescriptorCam06, vDescriptorCam07, vDescriptorCam08,
-//                vDescriptorCam09, vDescriptorCam10, vDescriptorCam11;
-//
-//        getSuperPoint(vstrSuperPointCam00[ni], vKeyPointCam00, vDescriptorCam00);
-//        getSuperPoint(vstrSuperPointCam01[ni], vKeyPointCam01, vDescriptorCam01);
-//        getSuperPoint(vstrSuperPointCam02[ni], vKeyPointCam02, vDescriptorCam02);
-//        getSuperPoint(vstrSuperPointCam03[ni], vKeyPointCam03, vDescriptorCam03);
-//        getSuperPoint(vstrSuperPointCam04[ni], vKeyPointCam04, vDescriptorCam04);
-//        getSuperPoint(vstrSuperPointCam05[ni], vKeyPointCam05, vDescriptorCam05);
-//        getSuperPoint(vstrSuperPointCam06[ni], vKeyPointCam06, vDescriptorCam06);
-//        getSuperPoint(vstrSuperPointCam07[ni], vKeyPointCam07, vDescriptorCam07);
-//        getSuperPoint(vstrSuperPointCam08[ni], vKeyPointCam08, vDescriptorCam08);
-//        getSuperPoint(vstrSuperPointCam09[ni], vKeyPointCam09, vDescriptorCam09);
-//        getSuperPoint(vstrSuperPointCam10[ni], vKeyPointCam10, vDescriptorCam10);
-//        getSuperPoint(vstrSuperPointCam11[ni], vKeyPointCam11, vDescriptorCam11);
-//
-//
-//
-//        double tframe = vTimestamps[ni];
-//
-//        vector<cv::Mat> *pvImCams = new vector<cv::Mat>({
-//                imCam00, imCam01, imCam02,
-//                imCam03, imCam04, imCam05,
-//                imCam06, imCam07, imCam08,
-//                imCam09, imCam10, imCam11});
-//
-//        vector<vector<vector<int>>> *pvKeyPoints = new vector<vector<vector<int>>>({
-//            vKeyPointCam00, vKeyPointCam01, vKeyPointCam02,
-//                    vKeyPointCam03, vKeyPointCam04, vKeyPointCam05,
-//                    vKeyPointCam06, vKeyPointCam07, vKeyPointCam08,
-//                    vKeyPointCam09, vKeyPointCam10, vKeyPointCam11});
-//
-//        vector<vector<vector<float>>> *pvDescriptor =  new vector<vector<vector<float>>>({
-//            vDescriptorCam00, vDescriptorCam01, vDescriptorCam02,
-//                    vDescriptorCam03, vDescriptorCam04, vDescriptorCam05,
-//                    vDescriptorCam06, vDescriptorCam07, vDescriptorCam08,
-//                    vDescriptorCam09, vDescriptorCam10, vDescriptorCam11});
-//
-//
-//
-//        if(imCam00.empty())
-//        {
-//            cerr << endl << "Failed to load image at: "
-//                 << string(vstrImageCam00[ni]) << endl;
-//            return 1;
-//        }
 
 
         double tframe = vTimestamps[ni];
@@ -525,19 +559,19 @@ int main(int argc, char **argv)
                 qpvDescriptor.pop();
                 break;
             } else {
-                cout << "I am waiting for Inputs." << endl;
+                // cout << "I am waiting for Inputs." << endl;
                 usleep(2000);
             }
         }
 
 
 
-        if((*pvImCams).size() != NumCam || (*pvKeyPoints).size() != NumCam || (*pvDescriptor).size() != NumCam)
-        {
-            cerr << endl << "Failed to load image at: "
-                 << string(vstrImageCam00[ni]) << endl;
-            return 1;
-        }
+//        if((*pvImCams).size() != NumCam || (*pvKeyPoints).size() != NumCam || (*pvDescriptor).size() != NumCam)
+//        {
+//            cerr << endl << "Failed to load image at: "
+//                 << string(vstrImageCam00[ni]) << endl;
+//            return 1;
+//        }
 
 
 
@@ -559,14 +593,14 @@ int main(int argc, char **argv)
         cv::Mat Tcw;
         Sophus::SE3f Tcw_Sophus;//Tcw_Sophus =
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////
-        //(*pvImCams).clear();pvDescriptor->clear();
         //Eigen::Matrix4f Twb = SLAM.TrackMultiCamera(*pvImCams, tframe, {}, {});
         Eigen::Matrix4f Twb = SLAM.TrackMultiCamera(*pvImCams, tframe, pvKeyPoints, pvDescriptor);
+        //Eigen::Matrix4f Twb;
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
         std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
         double ttrack= std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count();
-        cout << "SLAM use time : " << std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count() * 1000.0 << " ms." << endl;
+        cout <<  "\033[34m" << "SLAM use time : " << "\033[43m" << std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count() * 1000.0 << " ms." <<  "\033[0m" << endl;
 
 
         //release the memory
@@ -580,7 +614,7 @@ int main(int argc, char **argv)
 
 
 
-        cout << "Number : " <<  ni << " twb : " <<  LL_SLAM::CommonTools::T2t(Twb).transpose() << endl;
+        cout <<  "\033[34m" << "Number : " <<  ni << " twb : " <<  LL_SLAM::CommonTools::T2t(Twb).transpose() <<  "\033[0m" << endl;
         cout << endl;
         cout << endl;
 
@@ -598,7 +632,9 @@ int main(int argc, char **argv)
     }
 
     // Stop all threads
-    //SLAM.Shutdown();
+    usleep(1000*1000);
+    SLAM.Shutdown();
+    //delete SLAM.mpViewer;
 
     // Tracking time statistics
     sort(vTimesTrack.begin(),vTimesTrack.end());
@@ -731,152 +767,58 @@ void LoadSuperPoint(const string &strPathToSequence,
     }
 }
 
-//
-//
-//#include <iostream>
-//#include <fstream>
-//#include <vector>//
-//#include<Eigen/Dense>
-//#include <opencv2/opencv.hpp>
-//#include <opencv2/core/core.hpp>
-//using namespace std;
-//
-//std::vector<float> getSignal(std::string frameBinDir){
-//    std::vector<float> fDataBuff(2000000); // 申请空间，应足够大
-//    std::ifstream infile(frameBinDir.c_str(), std::ifstream::binary);
-//    infile.read((char*)&fDataBuff.front(), fDataBuff.size()*sizeof(float));
-//    int num_tx_samps = infile.gcount()/sizeof(float);
-//    fDataBuff.erase(fDataBuff.begin()+num_tx_samps, fDataBuff.end()); // 清除多余空间
-//    return fDataBuff;
-//}
-//
-//
-//int main() {
-//
-//    std::vector<float> a = getSignal("/home/intelnuc/CLionProjects/LL_SLAM_MultiCamera/000000.bin");
-//    for (int i = 0; i < a.size(); i+= 258) {
-//        cout << " x " << a[i] << " y " << a[i+1] << endl;
-//        for (int j = 0; j < 256; j+= 1) {
-//            cout <<  a[i + 2 + j] << " ";
-//        }
-//        cout << endl;
-//    }
-//
-//    std::vector<std::vector<float>> desc ;
-//    std::vector<pair<int, int>> pts ;
-//    for (int i = 0; i < a.size(); i+= 258) {
-//        std::vector<float>temp(256, 0.0);
-//        for (int j = 0; j < 256; j+= 1) {
-//            temp[j] = a[i + 2 + j];
-//        }
-//        desc.push_back(temp);
-//        pts.push_back({a[i], a[i+1]});
-//    }
-//
-//    auto desc0 = desc[0];
-//    auto desc1 = desc[1];
-//    float score_float = 0;
-//    float score_int = 0;
-//    float score_eigen = 0;
-//    float score_cv = 0;
-//    for (int j = 0; j < 256; j+= 1) {
-//        score_float += desc0[j] * desc1[j];
-//        score_int += float(int(256 * desc0[j]) * int(256 * desc1[j])) / (256.0*256.0);
-//    }
-//    cout << " score_float " << score_float << endl;
-//    cout << " score_int " << score_int << endl;
-//
-//    Eigen::Matrix<float, 256, 1> desc0_eigen;
-//    Eigen::Matrix<float, 256, 1> desc1_eigen;
-//    cv::Mat desc0_cv(256, 1, CV_32FC1);
-//    cv::Mat desc1_cv(256, 1, CV_32FC1);
-//    for (int j = 0; j < 256; j+= 1) {
-//        desc0_eigen(j, 0) = desc0[j];
-//        desc1_eigen(j, 0) = desc1[j];
-//        desc0_cv.at<float>(j, 0) = desc0[j];
-//        desc1_cv.at<float>(j, 0) = desc1[j];
-////        desc1_cv(j, 0) = desc1[j];
-//    }
-//
-//    {
-//        //0.001ms
-//        std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
-//        /////////////////
-//        for (int j = 0; j < 256; j+= 1) {
-//            score_float += desc0[j] * desc1[j];
-//        }
-//        /////////////////
-//        std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
-//        cout << "vector use time : " << std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count() * 1000.0 << " ms." << endl;
-//    }
-//    {
-//        //0.06ms score_eigen += desc0_eigen(j, 0) * desc1_eigen(j, 0);
-//        //0.0026ms score_eigen = desc0_eigen.dot(desc1_eigen);
-//        std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
-//        /////////////////
-//        for (int j = 0; j < 256; j+= 1) {
-//            score_eigen += desc0_eigen(j, 0) * desc1_eigen(j, 0);
-//        }
-////        score_eigen = desc0_eigen.dot(desc1_eigen);
-//        /////////////////
-//        std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
-//        cout << "eigen use time : " << std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count() * 1000.0 << " ms." << endl;
-//    }
-//    {
-//        ////////////////////////////////////////////////////
-//        //0.0014ms score_eigen += desc0_cv.at<float>(j, 0) * desc1_cv.at<float>(j, 0);
-//        ////////////////////////////////////////////////////
-//        //0.0025ms score_eigen += desc0_cv.at<float>(j) * desc1_cv.at<float>(j);
-//        //0.06ms score_cv = desc0_cv.dot(desc1_cv);
-//        //0.07ms score_cv = cv::norm(desc0_cv,desc1_cv,cv::NORM_L1);
-//        std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
-//        /////////////////
-//        for (int j = 0; j < 256; j+= 1) {
-//            score_eigen += desc0_cv.at<float>(j, 0) * desc1_cv.at<float>(j, 0);
-////            score_eigen += desc0_cv.at<float>(j) * desc1_cv.at<float>(j);
-//        }
-////        score_cv = desc0_cv.dot(desc1_cv);
-////        score_cv = cv::norm(desc0_cv,desc1_cv,cv::NORM_L1);
-//        /////////////////
-//        std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
-//        cout << "cv use time : " << std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count() * 1000.0 << " ms." << endl;
-//    }
-//
-//    cv::Mat img = cv::imread("/home/intelnuc/CLionProjects/LL_SLAM_MultiCamera/000000.png", -1);
-//    cv::Mat img_100 = img.clone();
-//    for (int i = 0; i < 100; i++) { cv::circle(img_100, cv::Point2f(pts[i].first, pts[i].second),2,cv::Scalar(0, 255, 0),-1); }
-//    cv::imshow("img_100", img_100);
-//
-//    cv::Mat img_500 = img.clone();
-//    for (int i = 0; i < 500; i++) { cv::circle(img_500, cv::Point2f(pts[i].first, pts[i].second),2,cv::Scalar(0, 255, 0),-1); }
-//    cv::imshow("img_500", img_500);
-//
-//    cv::Mat img_1000 = img.clone();
-//    for (int i = 0; i < 1000; i++) { cv::circle(img_1000, cv::Point2f(pts[i].first, pts[i].second),2,cv::Scalar(0, 255, 0),-1); }
-//    cv::imshow("img_1000", img_1000);
-//
-//    cv::Mat img_2000 = img.clone();
-//    for (int i = 0; i < 2000; i++) { cv::circle(img_2000, cv::Point2f(pts[i].first, pts[i].second),2,cv::Scalar(0, 255, 0),-1); }
-//    cv::imshow("img_2000", img_2000);
-//
-//    cv::waitKey(0);
-//
-//    return 0;
-//}
+// 新增：加载 XFeat 文件路径的函数
+void LoadXFeatPaths(const string &strPathToSequence,
+                vector<string> &vstrXFeatCam00,  vector<string> &vstrXFeatCam01,  vector<string> &vstrXFeatCam02,
+                vector<string> &vstrXFeatCam03,  vector<string> &vstrXFeatCam04,  vector<string> &vstrXFeatCam05,
+                vector<string> &vstrXFeatCam06,  vector<string> &vstrXFeatCam07,  vector<string> &vstrXFeatCam08,
+                vector<string> &vstrXFeatCam09,  vector<string> &vstrXFeatCam10,  vector<string> &vstrXFeatCam11
+                )
+{
+    vector<double> vTimestamps;
+    ifstream fTimes;
+    string strPathTimeFile = strPathToSequence + "/times.txt";
+    fTimes.open(strPathTimeFile.c_str());
+    while(!fTimes.eof())
+    {
+        string s;
+        getline(fTimes,s);
+        if(!s.empty())
+        {
+            stringstream ss;
+            ss << s;
+            double t;
+            ss >> t;
+            vTimestamps.push_back(t);
+        }
+    }
 
+    const int nTimes = vTimestamps.size();
 
-//
-//#include <System.h>
-//
-//using namespace std;
-//
-//int main() {
-//    std::cout << "Hello, World!" << std::endl;
-//    std::cout << "Hello, World!" << std::endl;
-//    cout << endl;
-//    LL_SLAM::System("aaa");
-//    string a = "asdad";
-//    cout << a << endl;
-//    return 0;
-//}
-//
+    vstrXFeatCam00.resize(nTimes);  vstrXFeatCam01.resize(nTimes);  vstrXFeatCam02.resize(nTimes);
+    vstrXFeatCam03.resize(nTimes);  vstrXFeatCam04.resize(nTimes);  vstrXFeatCam05.resize(nTimes);
+    vstrXFeatCam06.resize(nTimes);  vstrXFeatCam07.resize(nTimes);  vstrXFeatCam08.resize(nTimes);
+    vstrXFeatCam09.resize(nTimes);  vstrXFeatCam10.resize(nTimes);  vstrXFeatCam11.resize(nTimes);
+
+    for(int i=0; i<nTimes; i++)
+    {
+        stringstream ss;
+        ss << setfill('0') << setw(6) << i;
+
+        // 【关键修改点】：请确保这里的文件夹名称与您实际生成的文件夹名称一致！
+        // 假设您的 XFeat bin 文件存放在 XFeatCam00, XFeatCam01... 中
+        vstrXFeatCam00[i] = strPathToSequence + "/XfeatCam00/" + ss.str() + ".bin";
+        vstrXFeatCam01[i] = strPathToSequence + "/XfeatCam01/" + ss.str() + ".bin";
+        vstrXFeatCam02[i] = strPathToSequence + "/XfeatCam02/" + ss.str() + ".bin";
+        vstrXFeatCam03[i] = strPathToSequence + "/XfeatCam03/" + ss.str() + ".bin";
+        vstrXFeatCam04[i] = strPathToSequence + "/XfeatCam04/" + ss.str() + ".bin";
+        vstrXFeatCam05[i] = strPathToSequence + "/XfeatCam05/" + ss.str() + ".bin";
+
+        vstrXFeatCam06[i] = strPathToSequence + "/XfeatCam06/" + ss.str() + ".bin";
+        vstrXFeatCam07[i] = strPathToSequence + "/XfeatCam07/" + ss.str() + ".bin";
+        vstrXFeatCam08[i] = strPathToSequence + "/XfeatCam08/" + ss.str() + ".bin";
+        vstrXFeatCam09[i] = strPathToSequence + "/XfeatCam09/" + ss.str() + ".bin";
+        vstrXFeatCam10[i] = strPathToSequence + "/XfeatCam10/" + ss.str() + ".bin";
+        vstrXFeatCam11[i] = strPathToSequence + "/XfeatCam11/" + ss.str() + ".bin";
+    }
+}

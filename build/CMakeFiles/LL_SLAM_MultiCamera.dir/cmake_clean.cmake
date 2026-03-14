@@ -1,6 +1,6 @@
 file(REMOVE_RECURSE
-  "../lib/libLL_SLAM_MultiCamera.pdb"
-  "../lib/libLL_SLAM_MultiCamera.so"
+  "/data/code/LL_SLAM_MultiCamera/lib/libLL_SLAM_MultiCamera.pdb"
+  "/data/code/LL_SLAM_MultiCamera/lib/libLL_SLAM_MultiCamera.so"
   "CMakeFiles/LL_SLAM_MultiCamera.dir/src/CommonTools.cc.o"
   "CMakeFiles/LL_SLAM_MultiCamera.dir/src/CommonTools.cc.o.d"
   "CMakeFiles/LL_SLAM_MultiCamera.dir/src/FeatureExtractor.cc.o"
