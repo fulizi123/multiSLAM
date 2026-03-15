@@ -151,6 +151,51 @@ namespace LL_SLAM
 
     }
 
+    MapObjectUpdateStats LocalMapping::CreateOrUpdateMapObjects(KeyFrame *pCurrentKF)
+    {
+        MapObjectUpdateStats stats;
+        if (pCurrentKF == nullptr) {
+            return stats;
+        }
+
+        const Eigen::Matrix4f Twb = pCurrentKF->GetTwb();
+        for (int object_idx = 0; object_idx < int(pCurrentKF->mvObjectObservations.size()); object_idx++) {
+            const ObjectObservation &obs = pCurrentKF->mvObjectObservations[object_idx];
+            if (obs.track_id < 0) {
+                continue;
+            }
+            if (obs.is_static) {
+                stats.current_static_obs++;
+            }
+
+            MapObject *pObj = mpMap->GetMapObjectByTrackId(obs.track_id);
+            if (pObj == nullptr) {
+                pObj = new MapObject(obs, Twb);
+                mpMap->AddMapObject(pObj);
+                stats.new_mapobject++;
+            } else {
+                // Keep existing static map-object poses stable. Their pose is refined separately
+                // by object optimization instead of being reset by each new keyframe observation.
+                const bool updatePose = !obs.is_static;
+                pObj->UpdateFromObservation(obs, Twb, updatePose);
+                stats.updated_mapobject++;
+            }
+            pObj->AddObservation(pCurrentKF, object_idx);
+            pCurrentKF->AddObjectObservation(pObj, object_idx);
+        }
+
+        {
+            unique_lock<mutex> lock(mpMap->mMutexUpdate);
+            for (MapObject *pObj : mpMap->mvpObjectObservations) {
+                if (pObj == nullptr || pObj->isBad() || !pObj->IsStatic()) {
+                    continue;
+                }
+                stats.global_static_mapobject++;
+            }
+        }
+        return stats;
+    }
+
     void LocalMapping::MapPointCulling(KeyFrame *pCurrentKF)
     {
         if (pCurrentKF == nullptr) {
@@ -475,6 +520,12 @@ namespace LL_SLAM
             unique_lock<mutex> lock(mpSystem->mpTracker->mMutexUpdate);
             mpSystem->mpTracker->mpReferenceKF = pKF;
         }
+        const MapObjectUpdateStats objectStats = CreateOrUpdateMapObjects(pKF);
+        cout << "MapObject debug current_static_obs : " << objectStats.current_static_obs
+             << " new_mapobject : " << objectStats.new_mapobject
+             << " updated_mapobject : " << objectStats.updated_mapobject
+             << " global_static_mapobject : " << objectStats.global_static_mapobject
+             << endl;
         pKF->UpdateConnections();
         cout << "Debug mMutexUpdate 1 "  << endl ;
         mpMap->AddKeyFrame(pKF);
@@ -491,6 +542,14 @@ namespace LL_SLAM
         cout << "LocalBundleAdjustment edges : " << nBAEdges
              << " use time : "
              << std::chrono::duration_cast<std::chrono::duration<double> >(tBA2 - tBA1).count() * 1000.0
+             << " ms." << endl;
+
+        std::chrono::steady_clock::time_point tObj1 = std::chrono::steady_clock::now();
+        int nOptimizedObjects = Optimizer::OptimizeLocalObjects(pKF, mpMap);
+        std::chrono::steady_clock::time_point tObj2 = std::chrono::steady_clock::now();
+        cout << "OptimizeLocalObjects count : " << nOptimizedObjects
+             << " use time : "
+             << std::chrono::duration_cast<std::chrono::duration<double> >(tObj2 - tObj1).count() * 1000.0
              << " ms." << endl;
 
         Eigen::Matrix4f TbwAfterBA = pKF->GetPose();

@@ -48,7 +48,8 @@ namespace LL_SLAM
 
 
     Eigen::Matrix4f System::TrackMultiCamera(const vector<cv::Mat> &vImCams, const double &timestamp,
-                                             vector<vector<vector<int>>> * pvKeyPoints, vector<vector<vector<float>>> * pvDescriptor)
+                                             vector<vector<vector<int>>> * pvKeyPoints, vector<vector<vector<float>>> * pvDescriptor,
+                                             vector<ObjectObservation> * pvObjectObservations)
     {
         if ((*pvKeyPoints).size() == mNumCam) {
             mbUseDesc = true;
@@ -58,7 +59,7 @@ namespace LL_SLAM
 //            vImCamsToFeed[imCami] = vImCams[imCami].clone();
 //        }
 //
-        Eigen::Matrix4f Tcw = mpTracker->GrabImageMultiCamera(vImCams,timestamp, pvKeyPoints, pvDescriptor);
+        Eigen::Matrix4f Tcw = mpTracker->GrabImageMultiCamera(vImCams,timestamp, pvKeyPoints, pvDescriptor, pvObjectObservations);
 
 
         return Tcw;

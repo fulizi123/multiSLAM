@@ -1,5 +1,9 @@
 
 #include "Viewer.h"
+#include "MapObject.h"
+
+#include <array>
+#include <unordered_set>
 
 namespace
 {
@@ -78,6 +82,259 @@ namespace
         float scaleX = static_cast<float>(previewSize.width) / static_cast<float>(sourceSize.width);
         float scaleY = static_cast<float>(previewSize.height) / static_cast<float>(sourceSize.height);
         return cv::Point2f(point.x * scaleX, point.y * scaleY);
+    }
+
+    cv::Scalar GetObjectColor(bool isStatic, bool emphasize)
+    {
+        if (isStatic) {
+            return emphasize ? cv::Scalar(70, 235, 110) : cv::Scalar(110, 255, 160);
+        }
+        return emphasize ? cv::Scalar(40, 180, 255) : cv::Scalar(30, 110, 200);
+    }
+
+    std::vector<int> SelectSurroundPreviewCameras(const LL_SLAM::Frame *pFrame)
+    {
+        if (pFrame == nullptr || pFrame->mNumCam <= 0) {
+            return {};
+        }
+        // Fixed 12-camera rig layout from Carla.yaml:
+        // top-left/front-left, top-center/front, top-right/front-right,
+        // right, rear-right, rear, rear-left, left.
+        const std::vector<int> preferredOrder = {9, 1, 5, 4, 3, 7, 11, 10};
+
+        std::vector<int> selected;
+        selected.reserve(std::min<int>(preferredOrder.size(), pFrame->mNumCam));
+        for (int camIndex : preferredOrder) {
+            if (camIndex >= 0 && camIndex < pFrame->mNumCam) {
+                selected.push_back(camIndex);
+            }
+        }
+
+        if (selected.empty()) {
+            for (int camIndex = 0; camIndex < pFrame->mNumCam; ++camIndex) {
+                selected.push_back(camIndex);
+            }
+        }
+        return selected;
+    }
+
+    std::array<Eigen::Vector3f, 8> BuildCuboidCorners(const Eigen::Vector3f &center,
+                                                      const Eigen::Quaternionf &rotation,
+                                                      const Eigen::Vector3f &size)
+    {
+        // ObjectTrackTruth stores box size as [width, length, height], while the
+        // box pose quaternion uses the original nuScenes object frame:
+        // local x: forward, local y: left, local z: up.
+        const float halfWidth = 0.5f * size.x();
+        const float halfLength = 0.5f * size.y();
+        const float halfHeight = 0.5f * size.z();
+        const std::array<Eigen::Vector3f, 8> localCorners = {{
+            Eigen::Vector3f(-halfLength, -halfWidth, -halfHeight),
+            Eigen::Vector3f( halfLength, -halfWidth, -halfHeight),
+            Eigen::Vector3f( halfLength,  halfWidth, -halfHeight),
+            Eigen::Vector3f(-halfLength,  halfWidth, -halfHeight),
+            Eigen::Vector3f(-halfLength, -halfWidth,  halfHeight),
+            Eigen::Vector3f( halfLength, -halfWidth,  halfHeight),
+            Eigen::Vector3f( halfLength,  halfWidth,  halfHeight),
+            Eigen::Vector3f(-halfLength,  halfWidth,  halfHeight)
+        }};
+
+        std::array<Eigen::Vector3f, 8> worldCorners;
+        const Eigen::Matrix3f R = rotation.normalized().toRotationMatrix();
+        for (int i = 0; i < 8; ++i) {
+            worldCorners[i] = R * localCorners[i] + center;
+        }
+        return worldCorners;
+    }
+
+    void DrawBevCuboid(cv::Mat &canvas,
+                       const std::array<Eigen::Vector3f, 8> &corners,
+                       const Eigen::Vector3f &center,
+                       const cv::Scalar &color,
+                       float fbl,
+                       int thickness,
+                       const std::string &label)
+    {
+        if (canvas.empty()) {
+            return;
+        }
+
+        auto toCanvasPoint = [&](const Eigen::Vector3f &p) -> cv::Point {
+            return cv::Point(int(p.x() / fbl + canvas.cols * 0.5f),
+                             int(-p.z() / fbl + canvas.rows * 0.5f));
+        };
+
+        const int baseIndices[4] = {0, 1, 2, 3};
+        std::vector<cv::Point> polygon;
+        polygon.reserve(4);
+        for (int idx : baseIndices) {
+            polygon.push_back(toCanvasPoint(corners[idx]));
+        }
+        cv::polylines(canvas, polygon, true, color, thickness, cv::LINE_AA);
+
+        const cv::Point centerPt = toCanvasPoint(center);
+        const Eigen::Vector3f forward = 0.25f * (corners[1] + corners[2] + corners[5] + corners[6]) - center;
+        const cv::Point headingPt = toCanvasPoint(center + forward);
+        cv::arrowedLine(canvas, centerPt, headingPt, color, thickness, cv::LINE_AA, 0, 0.25);
+        cv::circle(canvas, centerPt, 3, color, -1, cv::LINE_AA);
+
+        if (!label.empty()) {
+            cv::putText(canvas, label, centerPt + cv::Point(6, -6),
+                        cv::FONT_HERSHEY_PLAIN, 1.0, color, 1, cv::LINE_AA);
+        }
+    }
+
+    void DrawObjectObservationsOnMap(cv::Mat &canvas,
+                                     const LL_SLAM::Frame *pFrame,
+                                     const Eigen::Matrix4f &Twb,
+                                     const Eigen::Vector3f &viewerPos,
+                                     float fbl)
+    {
+        if (pFrame == nullptr) {
+            return;
+        }
+        const Eigen::Matrix3f Rwb = LL_SLAM::CommonTools::T2R(Twb);
+        const Eigen::Vector3f twb = LL_SLAM::CommonTools::T2t(Twb);
+        Eigen::Quaternionf qwb(Rwb);
+        qwb.normalize();
+
+        for (int objectIdx = 0; objectIdx < int(pFrame->mvObjectObservations.size()); ++objectIdx) {
+            const auto &obj = pFrame->mvObjectObservations[objectIdx];
+            if (obj.is_static) {
+                continue;
+            }
+            LL_SLAM::MapObject *pMapObject =
+                objectIdx < int(pFrame->mvMapObjects.size()) ? pFrame->mvMapObjects[objectIdx] : nullptr;
+            if (pMapObject != nullptr && !pMapObject->isBad() && pMapObject->IsStatic()) {
+                continue;
+            }
+            const Eigen::Vector3f worldCenter = Rwb * obj.t_ref + twb;
+            Eigen::Quaternionf worldRotation = qwb * obj.q_ref;
+            worldRotation.normalize();
+            const Eigen::Vector3f centerInViewer = worldCenter - viewerPos;
+            const auto corners = BuildCuboidCorners(centerInViewer, worldRotation, obj.size);
+            DrawBevCuboid(canvas,
+                          corners,
+                          centerInViewer,
+                          GetObjectColor(obj.is_static, true),
+                          fbl,
+                          2,
+                          std::to_string(obj.track_id));
+        }
+    }
+
+    void DrawMapObjectsOnMap(cv::Mat &canvas,
+                             const std::vector<LL_SLAM::MapObject*> &vMapObjects,
+                             const Eigen::Vector3f &viewerPos,
+                             float fbl)
+    {
+        for (LL_SLAM::MapObject *pObj : vMapObjects) {
+            if (pObj == nullptr || pObj->isBad() || !pObj->IsStatic()) {
+                continue;
+            }
+            const Eigen::Vector3f center = pObj->GetWorldPos() - viewerPos;
+            const auto corners = BuildCuboidCorners(center, pObj->GetWorldRotation(), pObj->GetSize());
+            DrawBevCuboid(canvas,
+                          corners,
+                          center,
+                          GetObjectColor(pObj->IsStatic(), false),
+                          fbl,
+                          2,
+                          std::to_string(pObj->GetTrackId()));
+        }
+    }
+
+    void DrawProjectedCuboidOnPreview(cv::Mat &preview,
+                                      const LL_SLAM::Frame *pFrame,
+                                      int camIndex,
+                                      const cv::Size &sourceSize,
+                                      const LL_SLAM::ObjectObservation &obj)
+    {
+        if (preview.empty() || sourceSize.width <= 0 || sourceSize.height <= 0) {
+            return;
+        }
+
+        static const int edges[12][2] = {
+            {0, 1}, {1, 2}, {2, 3}, {3, 0},
+            {4, 5}, {5, 6}, {6, 7}, {7, 4},
+            {0, 4}, {1, 5}, {2, 6}, {3, 7}
+        };
+
+        const Eigen::Matrix4f Tcb = pFrame->mvTbc_cams[camIndex].inverse();
+        const Eigen::Matrix3f Rcb = LL_SLAM::CommonTools::T2R(Tcb);
+        const Eigen::Vector3f tcb = LL_SLAM::CommonTools::T2t(Tcb);
+        const Eigen::Matrix3f &K = pFrame->mvK_cams[camIndex];
+        const float nearPlane = 0.2f;
+
+        const auto cornersBody = BuildCuboidCorners(obj.t_ref, obj.q_ref, obj.size);
+        std::array<Eigen::Vector3f, 8> cornersCam;
+        for (int i = 0; i < 8; ++i) {
+            cornersCam[i] = Rcb * cornersBody[i] + tcb;
+        }
+
+        auto projectCameraPoint = [&](const Eigen::Vector3f &pointCam) -> cv::Point {
+            const float u = K(0, 0) * pointCam.x() / pointCam.z() + K(0, 2);
+            const float v = K(1, 1) * pointCam.y() / pointCam.z() + K(1, 2);
+            const cv::Point2f previewPoint = ScalePointToPreview(cv::Point2f(u, v), sourceSize, preview.size());
+            return cv::Point(cvRound(previewPoint.x), cvRound(previewPoint.y));
+        };
+
+        const cv::Scalar color = GetObjectColor(obj.is_static, true);
+        int drawnEdges = 0;
+        for (const auto &edge : edges) {
+            Eigen::Vector3f p0 = cornersCam[edge[0]];
+            Eigen::Vector3f p1 = cornersCam[edge[1]];
+
+            if (p0.z() <= nearPlane && p1.z() <= nearPlane) {
+                continue;
+            }
+
+            if (p0.z() <= nearPlane || p1.z() <= nearPlane) {
+                const float t = (nearPlane - p0.z()) / (p1.z() - p0.z());
+                const Eigen::Vector3f intersection = p0 + t * (p1 - p0);
+                if (p0.z() <= nearPlane) {
+                    p0 = intersection;
+                } else {
+                    p1 = intersection;
+                }
+            }
+
+            cv::Point q0 = projectCameraPoint(p0);
+            cv::Point q1 = projectCameraPoint(p1);
+            if (cv::clipLine(cv::Rect(0, 0, preview.cols, preview.rows), q0, q1)) {
+                cv::line(preview, q0, q1, color, 2, cv::LINE_AA);
+                drawnEdges++;
+            }
+        }
+        if (drawnEdges == 0) {
+            return;
+        }
+
+        cv::Point labelPoint;
+        bool hasLabelPoint = false;
+        for (int i = 0; i < 8; ++i) {
+            if (cornersCam[i].z() <= nearPlane) {
+                continue;
+            }
+            cv::Point candidate = projectCameraPoint(cornersCam[i]);
+            if (!hasLabelPoint || candidate.y < labelPoint.y) {
+                labelPoint = candidate;
+                hasLabelPoint = true;
+            }
+        }
+        if (!hasLabelPoint) {
+            return;
+        }
+        labelPoint.x = std::max(4, std::min(preview.cols - 40, labelPoint.x));
+        labelPoint.y = std::max(12, std::min(preview.rows - 4, labelPoint.y));
+        cv::putText(preview,
+                    std::to_string(obj.track_id),
+                    labelPoint + cv::Point(4, -4),
+                    cv::FONT_HERSHEY_PLAIN,
+                    1.0,
+                    color,
+                    1,
+                    cv::LINE_AA);
     }
 
     std::vector<int> DistancetoRGB(float dis)
@@ -240,14 +497,7 @@ namespace LL_SLAM
         }
 
         cv::Mat imShow = MakePreviewImage(vImCams[0], previewSize);
-        vector<cv::KeyPoint> vKeys = pCurrentFrame->mvCamKeysUn[0];
         cv::Size baseSourceSize = vImCams[0].size();
-        for (int i = 0; i < vKeys.size(); i++) {
-            if (vKeys[i].octave == 0) {
-                cv::Point2f previewPoint = ScalePointToPreview(vKeys[i].pt, baseSourceSize, imShow.size());
-                cv::circle(imShow, previewPoint, 2, cv::Scalar(0, 255, 0), -1);
-            }
-        }
 
 //        Eigen::Vector3f t_w_viewer = mpReferenceKF->Gettwb();
         Eigen::Vector3f t_w_viewer = pCurrentFrame->Gettwb();
@@ -378,6 +628,9 @@ namespace LL_SLAM
             cv::circle(img_map, cv::Point2f(Pi_u, Pi_v),5,cv::Scalar(255, 128, 30),-1);
         }
 
+        DrawMapObjectsOnMap(img_map, mpSystem->mpMap->mvpObjectObservations, t_w_viewer, fbl);
+        DrawObjectObservationsOnMap(img_map, pCurrentFrame, pCurrentFrame->GetTwb(), t_w_viewer, fbl);
+
         //camera
         {
             float camera_size = 0.3;
@@ -465,7 +718,20 @@ namespace LL_SLAM
             cv::putText(img_map, s.str(), cv::Point(5, img_map.rows * 0.95), cv::FONT_HERSHEY_PLAIN, 1,
                         cv::Scalar(255, 255, 255), 1, 8);
         }
-
+        {
+            int nStaticObjects = 0;
+            for (const auto &obj : pCurrentFrame->mvObjectObservations) {
+                if (obj.is_static) {
+                    nStaticObjects++;
+                }
+            }
+            std::stringstream s;
+            s << "obj obs : " << pCurrentFrame->mvObjectObservations.size()
+              << " static : " << nStaticObjects
+              << " map obj : " << mpSystem->mpMap->mvpObjectObservations.size();
+            cv::putText(img_map, s.str(), cv::Point(12, 24), cv::FONT_HERSHEY_PLAIN, 1.2,
+                        cv::Scalar(220, 220, 220), 1, cv::LINE_AA);
+        }
 
         //////////////////////////////////////////////////////////////////////////
 //        //debug
@@ -487,7 +753,7 @@ namespace LL_SLAM
 
         //////////////////////////////////////////////////////////////////////////
         if (mMp4LayoutMode == MP4_LAYOUT_SURROUND_8) {
-            vector<int> vImShowIndex = {0, 1, 2, 4, 5, 7, 9, 10};
+            vector<int> vImShowIndex = SelectSurroundPreviewCameras(pCurrentFrame);
             if (vImShowIndex.back() >= pCurrentFrame->mNumCam) {
                 vImShowIndex = {0};
             } else if (vImCams.size() > 2 && vImShowIndex.size() >= 3 && vImCams[1].datastart == vImCams[2].datastart) {
@@ -521,10 +787,6 @@ namespace LL_SLAM
                 for (int i = 0; i < keyCount; i++) {
                     cv::Point2f previewPoint = ScalePointToPreview(vCamKeys[i].pt, cameraSourceSize, imShowCami.size());
 
-                    if (vCamKeys[i].octave == 0) {
-                        cv::circle(imShowCami, previewPoint, 3, cv::Scalar(0, 255, 0), -1);
-                    }
-
                     if (pCurrentFrame->mvMapPoints[CamIndex][i] != NULL) {
                         float maxd = 60;
                         float centerX = imShowCami.cols * 0.5;
@@ -540,9 +802,16 @@ namespace LL_SLAM
                     }
                 }
 
+                for (const auto &obj : pCurrentFrame->mvObjectObservations) {
+                    DrawProjectedCuboidOnPreview(imShowCami, pCurrentFrame, CamIndex, cameraSourceSize, obj);
+                }
+
                 CopyPreviewToCanvas(imShowCami, img_map, vImShowPos[cami].first, vImShowPos[cami].second);
             }
         } else {
+            for (const auto &obj : pCurrentFrame->mvObjectObservations) {
+                DrawProjectedCuboidOnPreview(imShow, pCurrentFrame, 0, baseSourceSize, obj);
+            }
             CopyPreviewToCanvas(imShow, img_map, 0, 0);
         }
 

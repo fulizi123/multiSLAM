@@ -13,6 +13,7 @@
 #include "LocalMapping.h"
 #include "Viewer.h"
 #include "Optimizer.h"
+#include "ObjectObservation.h"
 namespace LL_SLAM
 {
     class System;
@@ -30,7 +31,8 @@ namespace LL_SLAM
         Tracking(System *pSystem);
 
         Eigen::Matrix4f GrabImageMultiCamera(const vector<cv::Mat> &vImCams, const double &timestamp,
-                                             vector<vector<vector<int>>> * pvKeyPoints , vector<vector<vector<float>>> * pvDescriptor);
+                                             vector<vector<vector<int>>> * pvKeyPoints , vector<vector<vector<float>>> * pvDescriptor,
+                                             vector<ObjectObservation> * pvObjectObservations);
 
         void Track();
 

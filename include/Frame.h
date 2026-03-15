@@ -6,12 +6,14 @@
 #include "MapPoint.h"
 #include "FeatureExtractor.h"
 #include "FeatureMatcher.h"
+#include "ObjectObservation.h"
 namespace LL_SLAM
 {
 //    #define FRAME_GRID_ROWS 48
 //    #define FRAME_GRID_COLS 64
 
     class System;
+    class MapObject;
     class MapPoint;
     class FeatureExtractor;
     class FeatureMatcher;
@@ -20,7 +22,8 @@ namespace LL_SLAM
     class Frame{
     public:
 
-        Frame(const vector<cv::Mat> &vImColorCams, const vector<cv::Mat> &vImCams,  vector<vector<vector<int>>> * pvKeyPoints,  vector<vector<vector<float>>> * pvDescriptor, const double &timeStamp,
+        Frame(const vector<cv::Mat> &vImColorCams, const vector<cv::Mat> &vImCams,  vector<vector<vector<int>>> * pvKeyPoints,  vector<vector<vector<float>>> * pvDescriptor,
+              vector<ObjectObservation> * pvObjectObservations, const double &timeStamp,
               vector<FeatureExtractor*> vextractors, System *pSystem);
 
         void ExtractORBMultiCamera(int Camid, const cv::Mat &im, FeatureExtractor* extractor);
@@ -80,6 +83,8 @@ namespace LL_SLAM
         vector<vector<vector<int>>> mvSuperPointKeyPoints;
         vector<vector<vector<float>>> mvSuperPointDescriptor;
         vector<pair<int, int>> mvWidthHeight;
+        vector<ObjectObservation> mvObjectObservations;
+        vector<MapObject*> mvMapObjects;
 
         //cam_i, iL : mapid
         vector<vector<int>> mvMatchResult;

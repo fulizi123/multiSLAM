@@ -11,6 +11,7 @@
 namespace LL_SLAM
 {
     class Frame;
+    class MapObject;
     class System;
     class Map;
     class MapPoint;
@@ -20,6 +21,8 @@ namespace LL_SLAM
 
         void AddObservation(MapPoint *pMP, int cam_i, int KeyPoint_i);
         void EraseObservation(int cam_i, int KeyPoint_i);
+        void AddObjectObservation(MapObject *pObj, int object_idx);
+        void EraseObjectObservation(int object_idx);
 
         void SetPose(const Eigen::Matrix4f &Tbw) ;
         Eigen::Matrix4f GetPose() const ;
@@ -57,6 +60,8 @@ namespace LL_SLAM
         vector<vector<cv::Vec3b>> mvColor;
         vector<pair<int, int>> mvWidthHeight;
         vector<vector<MapPoint*>> mvMapPoints;
+        vector<ObjectObservation> mvObjectObservations;
+        vector<MapObject*> mvMapObjects;
 //        //todo temp
 //        vector<vector<int>> mvMatchResult;
 //        vector<Eigen::Vector3f> mvMapPointPosition;

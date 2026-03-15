@@ -9,6 +9,7 @@
 #include "LocalMapping.h"
 #include "Map.h"
 #include "Viewer.h"
+#include "ObjectObservation.h"
 
 namespace LL_SLAM
 {
@@ -25,7 +26,8 @@ namespace LL_SLAM
         void Shutdown();
 
         Eigen::Matrix4f TrackMultiCamera(const vector<cv::Mat> &vImCams, const double &timestamp,
-                                         vector<vector<vector<int>>> * pvKeyPoints, vector<vector<vector<float>>> * pvDescriptor);
+                                         vector<vector<vector<int>>> * pvKeyPoints, vector<vector<vector<float>>> * pvDescriptor,
+                                         vector<ObjectObservation> * pvObjectObservations = nullptr);
 
         Tracking* mpTracker;
         LocalMapping* mpLocalMapper;

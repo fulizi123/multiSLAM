@@ -40,7 +40,8 @@ namespace LL_SLAM
     }
 
     Eigen::Matrix4f Tracking::GrabImageMultiCamera(const vector<cv::Mat> &vImCams, const double &timestamp,
-                                                   vector<vector<vector<int>>> * pvKeyPoints , vector<vector<vector<float>>> * pvDescriptor)
+                                                   vector<vector<vector<int>>> * pvKeyPoints , vector<vector<vector<float>>> * pvDescriptor,
+                                                   vector<ObjectObservation> * pvObjectObservations)
     {
 
         vector<cv::Mat> vImGrayCams(vImCams.size());
@@ -53,7 +54,7 @@ namespace LL_SLAM
 
         std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
         /////////////////
-        mpCurrentFrame = new Frame(vImCams, vImGrayCams,pvKeyPoints,pvDescriptor,timestamp,mvpFeatureExtractor,mpSystem);
+        mpCurrentFrame = new Frame(vImCams, vImGrayCams,pvKeyPoints,pvDescriptor,pvObjectObservations,timestamp,mvpFeatureExtractor,mpSystem);
         /////////////////
         std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
         cout << "Frame use time : " << std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count() * 1000.0 << " ms." << endl;
@@ -263,7 +264,7 @@ namespace LL_SLAM
 //        if ((mpCurrentFrame->mTimeStamp - mpReferenceKF->mTimeStamp)>=3.0) {
 //            return true;
 //        }
-        if (mpCurrentFrame->mnId %20 == 0) {
+        if (mpCurrentFrame->mnId %10 == 0) {
             return true;
         }
 

@@ -11,7 +11,8 @@ namespace LL_SLAM
     int Frame::FRAME_GRID_ROWS = 72;
     int Frame::FRAME_GRID_COLS = 128;
 
-    Frame::Frame(const vector<cv::Mat> &vImColorCams, const vector<cv::Mat> &vImCams, vector<vector<vector<int>>> * pvKeyPoints, vector<vector<vector<float>>> * pvDescriptor, const double &timeStamp,
+    Frame::Frame(const vector<cv::Mat> &vImColorCams, const vector<cv::Mat> &vImCams, vector<vector<vector<int>>> * pvKeyPoints, vector<vector<vector<float>>> * pvDescriptor,
+            vector<ObjectObservation> * pvObjectObservations, const double &timeStamp,
             vector<FeatureExtractor*> vextractors, System *pSystem)
     {
         mTimeStamp = timeStamp;
@@ -40,6 +41,9 @@ namespace LL_SLAM
         mvCamKeysUn.resize(mNumCam);
         mvCamDescriptors.resize(mNumCam);
         mvWidthHeight.resize(mNumCam);
+        if (pvObjectObservations != nullptr) {
+            mvObjectObservations = *pvObjectObservations;
+        }
 
 
         // Frame ID
@@ -118,6 +122,7 @@ namespace LL_SLAM
         for (int cam_i = 0; cam_i < mNumCam; cam_i++) {
             mvMapPoints[cam_i].resize(mvNCams[cam_i], NULL);
         }
+        mvMapObjects.resize(mvObjectObservations.size(), nullptr);
 
 
         mvColor.resize(mNumCam);

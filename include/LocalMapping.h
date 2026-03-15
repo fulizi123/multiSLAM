@@ -13,6 +13,13 @@
 
 namespace LL_SLAM
 {
+    struct MapObjectUpdateStats {
+        int current_static_obs = 0;
+        int new_mapobject = 0;
+        int updated_mapobject = 0;
+        int global_static_mapobject = 0;
+    };
+
     class System;
     class Frame;
     class KeyFrame;
@@ -30,6 +37,7 @@ namespace LL_SLAM
         void InsertFrame(Frame *pCurrentFrame) ;
 
         void CreateNewKeyFrame(Frame *pCurrentFrame) ;
+        MapObjectUpdateStats CreateOrUpdateMapObjects(KeyFrame *pCurrentKF);
         void MapPointCulling(KeyFrame *pCurrentKF);
         void KeyFrameCulling(KeyFrame *pCurrentKF);
 

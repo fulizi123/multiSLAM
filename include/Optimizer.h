@@ -38,6 +38,7 @@ namespace LL_SLAM
     public:
         int static PoseOptimization(Frame* pFrame);
         int static LocalBundleAdjustment(KeyFrame* pKF, Map* pMap);
+        int static OptimizeLocalObjects(KeyFrame* pKF, Map* pMap);
 
     };
 

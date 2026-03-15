@@ -37,6 +37,8 @@ namespace LL_SLAM
         mvCamDescriptors = pFrame->mvCamDescriptors;
         mvColor = pFrame->mvColor;
         mvMapPoints = pFrame->mvMapPoints;
+        mvObjectObservations = pFrame->mvObjectObservations;
+        mvMapObjects.resize(mvObjectObservations.size(), nullptr);
         mvWidthHeight = pFrame->mvWidthHeight;
 
         mvGridMultiCamera = pFrame->mvGridMultiCamera;
@@ -83,6 +85,22 @@ namespace LL_SLAM
             return;
         }
         mvMapPoints[cam_i][KeyPoint_i] = nullptr;
+    }
+
+    void KeyFrame::AddObjectObservation(MapObject *pObj, int object_idx) {
+        unique_lock<mutex> lock(mMutexMatch);
+        if (object_idx < 0 || object_idx >= int(mvMapObjects.size())) {
+            return;
+        }
+        mvMapObjects[object_idx] = pObj;
+    }
+
+    void KeyFrame::EraseObjectObservation(int object_idx) {
+        unique_lock<mutex> lock(mMutexMatch);
+        if (object_idx < 0 || object_idx >= int(mvMapObjects.size())) {
+            return;
+        }
+        mvMapObjects[object_idx] = nullptr;
     }
 
 
@@ -256,6 +274,7 @@ namespace LL_SLAM
         }
 
         vector<pair<MapPoint*, pair<int, int>>> vObservations;
+        vector<pair<MapObject*, int>> vObjectObservations;
         vector<KeyFrame*> vConnected;
         {
             unique_lock<mutex> lockConn(mMutexConnections);
@@ -284,6 +303,14 @@ namespace LL_SLAM
                     mvMapPoints[cam_i][kpi] = nullptr;
                 }
             }
+            for (int object_idx = 0; object_idx < int(mvMapObjects.size()); object_idx++) {
+                MapObject *pObj = mvMapObjects[object_idx];
+                if (pObj == nullptr) {
+                    continue;
+                }
+                vObjectObservations.push_back({pObj, object_idx});
+                mvMapObjects[object_idx] = nullptr;
+            }
         }
 
         for (const auto &obs : vObservations) {
@@ -291,6 +318,12 @@ namespace LL_SLAM
                 continue;
             }
             obs.first->EraseObservation(this, obs.second.first, obs.second.second);
+        }
+        for (const auto &obs : vObjectObservations) {
+            if (obs.first == nullptr || obs.first->isBad()) {
+                continue;
+            }
+            obs.first->EraseObservation(this, obs.second);
         }
 
         for (KeyFrame *pConnectedKF : vConnected) {

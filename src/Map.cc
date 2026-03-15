@@ -8,6 +8,7 @@ namespace LL_SLAM
     Map::Map(System *pSystem) {
         mvpMPObservations.reserve(1e6);
         mvpKFObservations.reserve(1e4);
+        mvpObjectObservations.reserve(1e5);
     }
 
     void Map::AddKeyFrame(KeyFrame *pKF) {
@@ -27,6 +28,13 @@ namespace LL_SLAM
         return ;
     }
 
+    void Map::AddMapObject(MapObject *pObj) {
+        unique_lock<mutex> lock(mMutexUpdate);
+        mvpObjectObservations.push_back(pObj);
+        mspObjectObservations.insert(pObj);
+        mTrackId2Object[pObj->GetTrackId()] = pObj;
+    }
+
 
 
     KeyFrame* Map::GetLastKeyFrame(){
@@ -35,10 +43,23 @@ namespace LL_SLAM
         return mvpKFObservations.back();
     }
 
+    MapObject *Map::GetMapObjectByTrackId(int track_id) {
+        unique_lock<mutex> lock(mMutexUpdate);
+        auto it = mTrackId2Object.find(track_id);
+        if (it == mTrackId2Object.end()) {
+            return nullptr;
+        }
+        if (it->second == nullptr || it->second->isBad()) {
+            return nullptr;
+        }
+        return it->second;
+    }
+
     void Map::UpdateLocalMap(KeyFrame *pReferenceKF) {
         unique_lock<mutex> lock(mMutexUpdate);
         mvpLocalKF.clear();
         mvpLocalMP.clear();
+        mvpLocalObject.clear();
         if (pReferenceKF == nullptr) {
             if (!mvpKFObservations.empty()) {
                 pReferenceKF = mvpKFObservations.back();
@@ -99,6 +120,20 @@ namespace LL_SLAM
         for (auto it : umMapPoints) {
             mvpLocalMP.push_back(it);
         }
+
+        unordered_set<MapObject*> umObjects;
+        for (KeyFrame *pKF : mvpLocalKF) {
+            for (MapObject *pObj : pKF->mvMapObjects) {
+                if (pObj == nullptr || pObj->isBad()) {
+                    continue;
+                }
+                umObjects.insert(pObj);
+            }
+        }
+        mvpLocalObject.reserve(umObjects.size());
+        for (auto it : umObjects) {
+            mvpLocalObject.push_back(it);
+        }
         return ;
     }
 
@@ -110,6 +145,11 @@ namespace LL_SLAM
     vector<MapPoint*> Map::GetLocalMapPoint() {
         unique_lock<mutex> lock(mMutexUpdate);
         return vector<MapPoint*>(mvpLocalMP.begin(),mvpLocalMP.end());
+    }
+
+    vector<MapObject*> Map::GetLocalMapObject() {
+        unique_lock<mutex> lock(mMutexUpdate);
+        return vector<MapObject*>(mvpLocalObject.begin(), mvpLocalObject.end());
     }
 
 } //namespace ORB_SLAM

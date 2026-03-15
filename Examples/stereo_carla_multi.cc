@@ -25,6 +25,7 @@
 #include<opencv2/core/core.hpp>
 
 #include<System.h>
+#include<ObjectObservation.h>
 //#include<Converter.h>
 #include "Thirdparty/Sophus/sophus/geometry.hpp"
 
@@ -36,6 +37,7 @@ int nMaxQueueLen = 5;
 queue<vector<cv::Mat> *> qpvImCams ;
 queue<vector<vector<vector<int>>> *> qpvKeyPoints ;
 queue<vector<vector<vector<float>>> *> qpvDescriptor ;
+queue<vector<LL_SLAM::ObjectObservation> *> qpvObjectObservations ;
 
 std::mutex MutexMsg;
 queue<cv::Mat> qImCam00 ;
@@ -76,6 +78,7 @@ queue<vector<vector<float>>> qDescriptor08 ;
 queue<vector<vector<float>>> qDescriptor09 ;
 queue<vector<vector<float>>> qDescriptor10 ;
 queue<vector<vector<float>>> qDescriptor11 ;
+queue<vector<LL_SLAM::ObjectObservation>> qObjectObservations;
 
 
 
@@ -110,6 +113,9 @@ void LoadXFeatPaths(const string &strPathToSequence,
                 vector<string> &vstrXFeatCam06,  vector<string> &vstrXFeatCam07,  vector<string> &vstrXFeatCam08,
                 vector<string> &vstrXFeatCam09,  vector<string> &vstrXFeatCam10,  vector<string> &vstrXFeatCam11
                 );
+void LoadObjectTrackPaths(const string &strPathToSequence, vector<string> &vstrObjectTrack);
+void getObjectTrack(const string &frameBinDir, vector<LL_SLAM::ObjectObservation> &vObjects);
+void LoadObjectTrackMultiThread(vector<string> vstrObjectTrack, queue<vector<LL_SLAM::ObjectObservation>> *qObjectTrackxx);
 
 void getSuperPoint(std::string frameBinDir, std::vector<std::vector<int>> &vKeyPoints, std::vector<std::vector<float>> &vDescriptors){
     //return ;
@@ -273,7 +279,8 @@ void LoadInputMultiThread (int N) {
                 qDescriptor00.size() > 0 &&qDescriptor01.size() > 0 &&qDescriptor02.size() > 0 &&
                 qDescriptor03.size() > 0 &&qDescriptor04.size() > 0 &&qDescriptor05.size() > 0 &&
                 qDescriptor06.size() > 0 &&qDescriptor07.size() > 0 &&qDescriptor08.size() > 0 &&
-                qDescriptor09.size() > 0 &&qDescriptor10.size() > 0 &&qDescriptor11.size() > 0  )
+                qDescriptor09.size() > 0 &&qDescriptor10.size() > 0 &&qDescriptor11.size() > 0 &&
+                qObjectObservations.size() > 0 )
             {
                 i++;
                 {
@@ -295,6 +302,9 @@ void LoadInputMultiThread (int N) {
                                 qDescriptor03.front(),qDescriptor04.front(),qDescriptor05.front(),
                                 qDescriptor06.front(),qDescriptor07.front(),qDescriptor08.front(),
                                 qDescriptor09.front(),qDescriptor10.front(),qDescriptor11.front() });
+
+                    vector<LL_SLAM::ObjectObservation> *pvObjectObservations =
+                                new vector<LL_SLAM::ObjectObservation>(qObjectObservations.front());
 //                    vector<cv::Mat> *pvImCams = new vector<cv::Mat>({ qImCam00.front(), qImCam01.front(), qImCam02.front()});
 //
 //                    vector<vector<vector<int>>> *pvKeyPoints = new vector<vector<vector<int>>>({ qKeyPoint00.front(), qKeyPoint01.front(), qKeyPoint02.front() });
@@ -304,6 +314,7 @@ void LoadInputMultiThread (int N) {
                     qpvImCams.push(pvImCams);
                     qpvKeyPoints.push(pvKeyPoints);
                     qpvDescriptor.push(pvDescriptor);
+                    qpvObjectObservations.push(pvObjectObservations);
 
                     qImCam00.pop(); qImCam01.pop(); qImCam02.pop();
                     qImCam03.pop(); qImCam04.pop(); qImCam05.pop();
@@ -317,6 +328,7 @@ void LoadInputMultiThread (int N) {
                     qDescriptor03.pop();qDescriptor04.pop();qDescriptor05.pop();
                     qDescriptor06.pop();qDescriptor07.pop();qDescriptor08.pop();
                     qDescriptor09.pop();qDescriptor10.pop();qDescriptor11.pop();
+                    qObjectObservations.pop();
                 }
             }
 
@@ -463,6 +475,9 @@ int main(int argc, char **argv)
                vstrSuperPointCam00,  vstrSuperPointCam01,  vstrSuperPointCam02,  vstrSuperPointCam03,  vstrSuperPointCam04,  vstrSuperPointCam05,
                vstrSuperPointCam06,  vstrSuperPointCam07,  vstrSuperPointCam08,  vstrSuperPointCam09,  vstrSuperPointCam10,  vstrSuperPointCam11);
 
+    vector<string> vstrObjectTrack;
+    LoadObjectTrackPaths(SequencePath, vstrObjectTrack);
+
     // // 新建变量来存储 XFeat 的文件路径
     // vector <string> vstrXFeatCam00, vstrXFeatCam01, vstrXFeatCam02;
     // vector <string> vstrXFeatCam03, vstrXFeatCam04, vstrXFeatCam05;
@@ -517,6 +532,7 @@ int main(int argc, char **argv)
     std::thread *mptLoadSuperPointMultiThread09 = new thread(&LoadSuperPointMultiThread, vstrSuperPointCam09, &qKeyPoint09, &qDescriptor09);
     std::thread *mptLoadSuperPointMultiThread10 = new thread(&LoadSuperPointMultiThread, vstrSuperPointCam10, &qKeyPoint10, &qDescriptor10);
     std::thread *mptLoadSuperPointMultiThread11 = new thread(&LoadSuperPointMultiThread, vstrSuperPointCam11, &qKeyPoint11, &qDescriptor11);
+    std::thread *mptLoadObjectTrackMultiThread = new thread(&LoadObjectTrackMultiThread, vstrObjectTrack, &qObjectObservations);
     
     
     // // // 启动 XFeat 加载线程 (传入上面获取的 vstrXFeatCamXX)
@@ -548,15 +564,18 @@ int main(int argc, char **argv)
         vector<cv::Mat> *pvImCams ;
         vector<vector<vector<int>>> *pvKeyPoints ;
         vector<vector<vector<float>>> *pvDescriptor ;
+        vector<LL_SLAM::ObjectObservation> *pvObjectObservations;
         while ( 1 ) {
             if (qpvImCams.size() > 0) {
                 pvImCams = qpvImCams.front();
                 pvKeyPoints = qpvKeyPoints.front();
                 pvDescriptor = qpvDescriptor.front();
+                pvObjectObservations = qpvObjectObservations.front();
 
                 qpvImCams.pop();
                 qpvKeyPoints.pop();
                 qpvDescriptor.pop();
+                qpvObjectObservations.pop();
                 break;
             } else {
                 // cout << "I am waiting for Inputs." << endl;
@@ -594,7 +613,7 @@ int main(int argc, char **argv)
         Sophus::SE3f Tcw_Sophus;//Tcw_Sophus =
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////
         //Eigen::Matrix4f Twb = SLAM.TrackMultiCamera(*pvImCams, tframe, {}, {});
-        Eigen::Matrix4f Twb = SLAM.TrackMultiCamera(*pvImCams, tframe, pvKeyPoints, pvDescriptor);
+        Eigen::Matrix4f Twb = SLAM.TrackMultiCamera(*pvImCams, tframe, pvKeyPoints, pvDescriptor, pvObjectObservations);
         //Eigen::Matrix4f Twb;
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -609,6 +628,19 @@ int main(int argc, char **argv)
         }
         vector<vector<vector<int>>>().swap(* pvKeyPoints);
         vector<vector<vector<float>>>().swap(* pvDescriptor);
+
+        int nStaticObjects = 0;
+        for (const auto &obj : *pvObjectObservations) {
+            if (obj.is_static) {
+                nStaticObjects++;
+            }
+        }
+        cout << "\033[36m"
+             << "ObjectTrack count : " << pvObjectObservations->size()
+             << " static : " << nStaticObjects
+             << "\033[0m" << endl;
+        vector<LL_SLAM::ObjectObservation>().swap(*pvObjectObservations);
+        delete pvObjectObservations;
 
 
 
@@ -820,5 +852,117 @@ void LoadXFeatPaths(const string &strPathToSequence,
         vstrXFeatCam09[i] = strPathToSequence + "/XfeatCam09/" + ss.str() + ".bin";
         vstrXFeatCam10[i] = strPathToSequence + "/XfeatCam10/" + ss.str() + ".bin";
         vstrXFeatCam11[i] = strPathToSequence + "/XfeatCam11/" + ss.str() + ".bin";
+    }
+}
+
+void LoadObjectTrackPaths(const string &strPathToSequence, vector<string> &vstrObjectTrack)
+{
+    vector<double> vTimestamps;
+    ifstream fTimes;
+    string strPathTimeFile = strPathToSequence + "/times.txt";
+    fTimes.open(strPathTimeFile.c_str());
+    while(!fTimes.eof())
+    {
+        string s;
+        getline(fTimes,s);
+        if(!s.empty())
+        {
+            stringstream ss;
+            ss << s;
+            double t;
+            ss >> t;
+            vTimestamps.push_back(t);
+        }
+    }
+
+    const int nTimes = vTimestamps.size();
+    vstrObjectTrack.resize(nTimes);
+
+    const string objectTrackTruthDir = strPathToSequence + "/ObjectTrackTruth/";
+    const string objectTrackDir = strPathToSequence + "/ObjectTrack/";
+    ifstream truthProbe((objectTrackTruthDir + "000000.bin").c_str(), ios::binary);
+    ifstream objectProbe((objectTrackDir + "000000.bin").c_str(), ios::binary);
+    string selectedDir;
+    if (truthProbe.good()) {
+        selectedDir = objectTrackTruthDir;
+    } else if (objectProbe.good()) {
+        selectedDir = objectTrackDir;
+    } else {
+        cout << "[ObjectTrack] No ObjectTrackTruth/ or ObjectTrack/ bins found under: "
+             << strPathToSequence << endl;
+        selectedDir = objectTrackTruthDir;
+    }
+    cout << "ObjectTrack dir : " << selectedDir << endl;
+
+    for (int i = 0; i < nTimes; i++)
+    {
+        stringstream ss;
+        ss << setfill('0') << setw(6) << i;
+        vstrObjectTrack[i] = selectedDir + ss.str() + ".bin";
+    }
+}
+
+void getObjectTrack(const string &frameBinDir, vector<LL_SLAM::ObjectObservation> &vObjects)
+{
+    std::ifstream infile(frameBinDir.c_str(), std::ifstream::binary);
+    if (!infile.is_open()) {
+        vObjects.clear();
+        return;
+    }
+
+    infile.seekg(0, std::ios::end);
+    std::streampos fileSize = infile.tellg();
+    infile.seekg(0, std::ios::beg);
+    if (fileSize <= 0) {
+        vObjects.clear();
+        return;
+    }
+
+    const int floatPerObject = LL_SLAM::ObjectObservation::kNumFloatsPerObject;
+    std::vector<float> fDataBuff(fileSize / sizeof(float));
+    infile.read(reinterpret_cast<char*>(&fDataBuff.front()), fileSize);
+    infile.close();
+
+    if (fDataBuff.size() % floatPerObject != 0) {
+        std::cerr << "[ObjectTrack Error] File size mismatch! " << frameBinDir << std::endl;
+        vObjects.clear();
+        return;
+    }
+
+    const int N = fDataBuff.size() / floatPerObject;
+    vObjects.resize(N);
+    for (int i = 0; i < N; i++) {
+        const int baseIdx = i * floatPerObject;
+        LL_SLAM::ObjectObservation &obj = vObjects[i];
+        obj.track_id = int(fDataBuff[baseIdx + 0]);
+        obj.class_id = int(fDataBuff[baseIdx + 1]);
+        obj.score = fDataBuff[baseIdx + 2];
+        obj.t_ref = Eigen::Vector3f(fDataBuff[baseIdx + 3], fDataBuff[baseIdx + 4], fDataBuff[baseIdx + 5]);
+        obj.size = Eigen::Vector3f(fDataBuff[baseIdx + 6], fDataBuff[baseIdx + 7], fDataBuff[baseIdx + 8]);
+        obj.v_ref = Eigen::Vector3f(fDataBuff[baseIdx + 9], fDataBuff[baseIdx + 10], fDataBuff[baseIdx + 11]);
+        obj.q_ref = Eigen::Quaternionf(fDataBuff[baseIdx + 15], fDataBuff[baseIdx + 12], fDataBuff[baseIdx + 13], fDataBuff[baseIdx + 14]);
+        obj.speed = fDataBuff[baseIdx + 16];
+        obj.is_static = fDataBuff[baseIdx + 17] > 0.5f;
+        obj.t_world = Eigen::Vector3f(fDataBuff[baseIdx + 18], fDataBuff[baseIdx + 19], fDataBuff[baseIdx + 20]);
+        obj.num_lidar_pts = int(fDataBuff[baseIdx + 21]);
+        obj.num_radar_pts = int(fDataBuff[baseIdx + 22]);
+    }
+}
+
+void LoadObjectTrackMultiThread(vector<string> vstrObjectTrack, queue<vector<LL_SLAM::ObjectObservation>> *qObjectTrackxx)
+{
+    int i = 0;
+    while (i < vstrObjectTrack.size()) {
+        if ((*qObjectTrackxx).size() >= nMaxQueueLen) {
+            usleep(2000);
+        } else {
+            vector<LL_SLAM::ObjectObservation> vObjects;
+            getObjectTrack(vstrObjectTrack[i], vObjects);
+            i++;
+            {
+                unique_lock<mutex> lock(MutexMsg);
+                (*qObjectTrackxx).push(vObjects);
+            }
+        }
     }
 }

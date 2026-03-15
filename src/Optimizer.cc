@@ -3,12 +3,40 @@
 
 #include <unordered_set>
 
+#include "MapObject.h"
+
 
 namespace LL_SLAM
 {
 
     namespace
     {
+        double WrapAngle(double angle)
+        {
+            constexpr double kPi = 3.14159265358979323846;
+            while (angle > kPi) {
+                angle -= 2.0 * kPi;
+            }
+            while (angle < -kPi) {
+                angle += 2.0 * kPi;
+            }
+            return angle;
+        }
+
+        double YawFromRotation(const Eigen::Matrix3d &R)
+        {
+            // ObjectTrack/GT boxes use local x as the vehicle forward axis.
+            const Eigen::Vector3d forward = R.col(0);
+            return std::atan2(forward.x(), forward.z());
+        }
+
+        double YawFromQuaternion(const Eigen::Quaternionf &q)
+        {
+            Eigen::Quaterniond qd(q.w(), q.x(), q.y(), q.z());
+            qd.normalize();
+            return YawFromRotation(qd.toRotationMatrix());
+        }
+
         g2o::VertexSE3ExpmapMultiCamera* CreatePoseVertex(int id, const Eigen::Matrix4f &TbwInput, bool fixed)
         {
             g2o::VertexSE3ExpmapMultiCamera *vSE3 = new g2o::VertexSE3ExpmapMultiCamera();
@@ -450,6 +478,7 @@ namespace LL_SLAM
         }
 
         int nEdges = 0;
+        int nPointEdges = 0;
         for (MapPoint *pMP : vpOptimizableMPs) {
             auto itPoint = dictMP2Index.find(pMP);
             if (itPoint == dictMP2Index.end()) {
@@ -484,8 +513,10 @@ namespace LL_SLAM
                 ConfigureMonoEdge(e, pObsKF, cam_i, kpUn);
                 optimizer.addEdge(e);
                 nEdges++;
+                nPointEdges++;
             }
         }
+        cout << "LocalBundleAdjustment point edges : " << nPointEdges << endl;
 
         if (nEdges < 10) {
             return nEdges;
@@ -519,6 +550,100 @@ namespace LL_SLAM
         }
 
         return nEdges;
+    }
+
+    int Optimizer::OptimizeLocalObjects(KeyFrame *pKF, Map *pMap)
+    {
+        if (pKF == nullptr || pMap == nullptr || pKF->isBad()) {
+            return 0;
+        }
+
+        vector<MapObject*> vpLocalObjects = pMap->GetLocalMapObject();
+        int nOptimizedObjects = 0;
+        const int kMinStaticObservations = 3;
+        const double kMaxAcceptedJumpMeters = 2.0;
+        const double kMaxAcceptedYawJumpRad = 35.0 * M_PI / 180.0;
+        const float kObjectPositionBlend = 0.25f;
+        const float kObjectYawBlend = 0.25f;
+
+        for (MapObject *pObj : vpLocalObjects) {
+            if (pObj == nullptr || pObj->isBad() || !pObj->IsStatic()) {
+                continue;
+            }
+
+            vector<pair<KeyFrame*, int>> vObservations = pObj->GetObservations();
+            if (vObservations.size() < kMinStaticObservations) {
+                continue;
+            }
+
+            double sumX = 0.0;
+            double sumY = 0.0;
+            double sumZ = 0.0;
+            double sumSinYaw = 0.0;
+            double sumCosYaw = 0.0;
+            int nValidObs = 0;
+
+            for (const auto &obsInfo : vObservations) {
+                KeyFrame *pObsKF = obsInfo.first;
+                const int objectIdx = obsInfo.second;
+                if (pObsKF == nullptr || pObsKF->isBad()) {
+                    continue;
+                }
+                if (objectIdx < 0 || objectIdx >= int(pObsKF->mvObjectObservations.size())) {
+                    continue;
+                }
+
+                const ObjectObservation &obs = pObsKF->mvObjectObservations[objectIdx];
+                const Eigen::Matrix4f Twb = pObsKF->GetTwb();
+                const Eigen::Matrix3f Rwb = CommonTools::T2R(Twb);
+                const Eigen::Vector3f twb = CommonTools::T2t(Twb);
+                const Eigen::Vector3f worldPos = Rwb * obs.t_ref + twb;
+
+                Eigen::Quaternionf qwb(Rwb);
+                qwb.normalize();
+                Eigen::Quaternionf qwo = qwb * obs.q_ref;
+                qwo.normalize();
+                const double worldYaw = YawFromQuaternion(qwo);
+
+                sumX += static_cast<double>(worldPos.x());
+                sumY += static_cast<double>(worldPos.y());
+                sumZ += static_cast<double>(worldPos.z());
+                sumSinYaw += std::sin(worldYaw);
+                sumCosYaw += std::cos(worldYaw);
+                nValidObs++;
+            }
+
+            if (nValidObs < kMinStaticObservations) {
+                continue;
+            }
+
+            const Eigen::Vector3f currentWorldPos = pObj->GetWorldPos();
+            const Eigen::Quaternionf currentRotation = pObj->GetWorldRotation();
+            const double currentYaw = YawFromQuaternion(currentRotation);
+
+            const Eigen::Vector3f averagedWorldPos(static_cast<float>(sumX / nValidObs),
+                                                   static_cast<float>(sumY / nValidObs),
+                                                   static_cast<float>(sumZ / nValidObs));
+            const double averagedYaw = std::atan2(sumSinYaw, sumCosYaw);
+
+            const double positionJump = (averagedWorldPos - currentWorldPos).norm();
+            const double yawJump = std::abs(WrapAngle(averagedYaw - currentYaw));
+            if (positionJump > kMaxAcceptedJumpMeters || yawJump > kMaxAcceptedYawJumpRad) {
+                continue;
+            }
+
+            const Eigen::Vector3f optimizedWorldPos =
+                currentWorldPos + kObjectPositionBlend * (averagedWorldPos - currentWorldPos);
+            const float blendedYawDelta =
+                static_cast<float>(kObjectYawBlend * WrapAngle(averagedYaw - currentYaw));
+            Eigen::Quaternionf optimizedRotation =
+                Eigen::AngleAxisf(blendedYawDelta, Eigen::Vector3f::UnitY()) * currentRotation.normalized();
+            optimizedRotation.normalize();
+            pObj->SetWorldPose(optimizedWorldPos, optimizedRotation);
+            nOptimizedObjects++;
+        }
+
+        return nOptimizedObjects;
     }
 
 
