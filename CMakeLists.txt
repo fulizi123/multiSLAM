@@ -76,6 +76,7 @@ add_library(${PROJECT_NAME} SHARED
         src/FeatureExtractor.cc
         src/FeatureMatcher.cc
         src/MapPoint.cc
+        src/MapObject.cc
         src/KeyFrame.cc
         src/Map.cc
         src/CommonTools.cc
@@ -88,6 +89,7 @@ add_library(${PROJECT_NAME} SHARED
         include/FeatureExtractor.h
         include/FeatureMatcher.h
         include/MapPoint.h
+        include/MapObject.h
         include/KeyFrame.h
         include/Map.h
         include/CommonTools.h
