@@ -1,9 +1,12 @@
 
 #include "Optimizer.h"
 
+#include <algorithm>
+#include <limits>
 #include <unordered_set>
 
 #include "MapObject.h"
+#include "Thirdparty/g2o/g2o/core/base_unary_edge.h"
 
 
 namespace LL_SLAM
@@ -80,6 +83,259 @@ namespace LL_SLAM
             g2o::RobustKernelHuber *rk = new g2o::RobustKernelHuber;
             rk->setDelta(std::sqrt(5.991));
             e->setRobustKernel(rk);
+        }
+
+        double Clamp(double value, double lower, double upper)
+        {
+            return std::max(lower, std::min(upper, value));
+        }
+
+        double ComputeMedian(std::vector<double> values)
+        {
+            if (values.empty()) {
+                return 0.0;
+            }
+            const size_t mid = values.size() / 2;
+            std::nth_element(values.begin(), values.begin() + mid, values.end());
+            double median = values[mid];
+            if ((values.size() % 2) == 0) {
+                std::nth_element(values.begin(), values.begin() + mid - 1, values.end());
+                median = 0.5 * (median + values[mid - 1]);
+            }
+            return median;
+        }
+
+        double ComputeMedianAbsDeviation(const std::vector<double> &values, double median)
+        {
+            std::vector<double> deviations;
+            deviations.reserve(values.size());
+            for (double value : values) {
+                deviations.push_back(std::abs(value - median));
+            }
+            return ComputeMedian(deviations);
+        }
+
+        Eigen::Vector3d ComputeComponentMedian(const std::vector<Eigen::Vector3d> &values)
+        {
+            if (values.empty()) {
+                return Eigen::Vector3d::Zero();
+            }
+            std::vector<double> xs;
+            std::vector<double> ys;
+            std::vector<double> zs;
+            xs.reserve(values.size());
+            ys.reserve(values.size());
+            zs.reserve(values.size());
+            for (const Eigen::Vector3d &value : values) {
+                xs.push_back(value.x());
+                ys.push_back(value.y());
+                zs.push_back(value.z());
+            }
+            return Eigen::Vector3d(ComputeMedian(xs), ComputeMedian(ys), ComputeMedian(zs));
+        }
+
+        double ComputeRobustYawReference(const std::vector<double> &yaws)
+        {
+            if (yaws.empty()) {
+                return 0.0;
+            }
+            double bestYaw = yaws.front();
+            double bestCost = std::numeric_limits<double>::max();
+            for (double candidateYaw : yaws) {
+                double cost = 0.0;
+                for (double yaw : yaws) {
+                    cost += std::abs(WrapAngle(yaw - candidateYaw));
+                }
+                if (cost < bestCost) {
+                    bestCost = cost;
+                    bestYaw = candidateYaw;
+                }
+            }
+            return bestYaw;
+        }
+
+        double ComputeObjectObservationWeight(const MapObject *pObj,
+                                              const ObjectObservation &obs)
+        {
+            const double score = obs.score > 0.0f ? Clamp(obs.score, 0.20, 1.0) : 1.0;
+            const int supportPoints = std::max(0, obs.num_lidar_pts + obs.num_radar_pts);
+            const double supportWeight = 1.0 + std::min(10, supportPoints) / 40.0;
+            const double distanceWeight = 1.0 / std::sqrt(1.0 + obs.t_ref.norm() / 30.0);
+            double stabilityWeight = 1.0;
+            if (pObj != nullptr) {
+                stabilityWeight = Clamp(0.85 + 0.015 * std::min(pObj->GetSeenCount(), 10), 0.85, 1.0);
+            }
+
+            return Clamp(score * supportWeight * distanceWeight * stabilityWeight, 0.20, 2.5);
+        }
+
+        struct ObjectObservationEntry
+        {
+            KeyFrame *pKF = nullptr;
+            int objectIdx = -1;
+            Eigen::Vector3d worldPos = Eigen::Vector3d::Zero();
+            double worldYaw = 0.0;
+            double weight = 1.0;
+        };
+
+        class VertexObjectPose final : public g2o::BaseVertex<4, Eigen::Vector4d>
+        {
+        public:
+            EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+            bool read(std::istream &) override { return false; }
+            bool write(std::ostream &) const override { return false; }
+
+            void setToOriginImpl() override
+            {
+                _estimate.setZero();
+            }
+
+            void oplusImpl(const double *update_) override
+            {
+                Eigen::Map<const Eigen::Vector4d> update(update_);
+                _estimate.head<3>() += update.head<3>();
+                _estimate[3] = WrapAngle(_estimate[3] + update[3]);
+            }
+        };
+
+        class EdgeObjectPositionUnary final
+            : public g2o::BaseUnaryEdge<3, Eigen::Vector3d, VertexObjectPose>
+        {
+        public:
+            EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+            bool read(std::istream &) override { return false; }
+            bool write(std::ostream &) const override { return false; }
+
+            void computeError() override
+            {
+                const VertexObjectPose *vObj = static_cast<const VertexObjectPose*>(_vertices[0]);
+                _error = vObj->estimate().head<3>() - _measurement;
+            }
+
+            void linearizeOplus() override
+            {
+                _jacobianOplusXi.setZero();
+                _jacobianOplusXi.block<3, 3>(0, 0).setIdentity();
+            }
+        };
+
+        class EdgeObjectYawUnary final
+            : public g2o::BaseUnaryEdge<1, Eigen::Matrix<double, 1, 1>, VertexObjectPose>
+        {
+        public:
+            EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+            bool read(std::istream &) override { return false; }
+            bool write(std::ostream &) const override { return false; }
+
+            void computeError() override
+            {
+                const VertexObjectPose *vObj = static_cast<const VertexObjectPose*>(_vertices[0]);
+                _error[0] = WrapAngle(vObj->estimate()[3] - _measurement[0]);
+            }
+
+            void linearizeOplus() override
+            {
+                _jacobianOplusXi.setZero();
+                _jacobianOplusXi(0, 3) = 1.0;
+            }
+        };
+
+        struct ObjectOptimizationEstimate
+        {
+            Eigen::Vector3d position = Eigen::Vector3d::Zero();
+            double yaw = 0.0;
+            double averageWeight = 1.0;
+        };
+
+        ObjectOptimizationEstimate OptimizeObjectWithObservations(
+            const Eigen::Vector3d &initialPos,
+            double initialYaw,
+            const std::vector<ObjectObservationEntry> &observations,
+            const MapObject *pObj)
+        {
+            ObjectOptimizationEstimate result;
+            result.position = initialPos;
+            result.yaw = initialYaw;
+            if (observations.empty()) {
+                return result;
+            }
+
+            double averageWeight = 0.0;
+            for (const ObjectObservationEntry &obs : observations) {
+                averageWeight += obs.weight;
+            }
+            averageWeight /= observations.size();
+            result.averageWeight = averageWeight;
+
+            g2o::SparseOptimizer optimizer;
+            g2o::BlockSolverX::LinearSolverType *linearSolver =
+                new g2o::LinearSolverDense<g2o::BlockSolverX::PoseMatrixType>();
+            g2o::BlockSolverX *solverPtr = new g2o::BlockSolverX(linearSolver);
+            g2o::OptimizationAlgorithmLevenberg *solver = new g2o::OptimizationAlgorithmLevenberg(solverPtr);
+            optimizer.setAlgorithm(solver);
+            optimizer.setVerbose(false);
+
+            VertexObjectPose *vObj = new VertexObjectPose();
+            Eigen::Vector4d estimate;
+            estimate << initialPos.x(), initialPos.y(), initialPos.z(), initialYaw;
+            vObj->setEstimate(estimate);
+            vObj->setId(0);
+            vObj->setFixed(false);
+            optimizer.addVertex(vObj);
+
+            const double positionHuberDelta = std::sqrt(7.815);
+            const double yawHuberDelta = std::sqrt(3.841);
+            for (const ObjectObservationEntry &obs : observations) {
+                EdgeObjectPositionUnary *ePos = new EdgeObjectPositionUnary();
+                ePos->setVertex(0, vObj);
+                ePos->setMeasurement(obs.worldPos);
+                ePos->setInformation(Eigen::Matrix3d::Identity() * obs.weight);
+                g2o::RobustKernelHuber *rkPos = new g2o::RobustKernelHuber;
+                rkPos->setDelta(positionHuberDelta);
+                ePos->setRobustKernel(rkPos);
+                optimizer.addEdge(ePos);
+
+                EdgeObjectYawUnary *eYaw = new EdgeObjectYawUnary();
+                eYaw->setVertex(0, vObj);
+                Eigen::Matrix<double, 1, 1> yawMeasurement;
+                yawMeasurement[0] = obs.worldYaw;
+                eYaw->setMeasurement(yawMeasurement);
+                eYaw->setInformation(Eigen::Matrix<double, 1, 1>::Identity() * (0.5 * obs.weight));
+                g2o::RobustKernelHuber *rkYaw = new g2o::RobustKernelHuber;
+                rkYaw->setDelta(yawHuberDelta);
+                eYaw->setRobustKernel(rkYaw);
+                optimizer.addEdge(eYaw);
+            }
+
+            const double observationCountScale =
+                std::sqrt(std::max<size_t>(size_t(1), observations.size()));
+            const double temporalPositionWeight = 0.30 * averageWeight / observationCountScale;
+            const double temporalYawWeight = 0.20 * averageWeight / observationCountScale;
+
+            EdgeObjectPositionUnary *eTemporalPos = new EdgeObjectPositionUnary();
+            eTemporalPos->setVertex(0, vObj);
+            eTemporalPos->setMeasurement(initialPos);
+            eTemporalPos->setInformation(Eigen::Matrix3d::Identity() * temporalPositionWeight);
+            optimizer.addEdge(eTemporalPos);
+
+            EdgeObjectYawUnary *eTemporalYaw = new EdgeObjectYawUnary();
+            eTemporalYaw->setVertex(0, vObj);
+            Eigen::Matrix<double, 1, 1> initialYawMeasurement;
+            initialYawMeasurement[0] = initialYaw;
+            eTemporalYaw->setMeasurement(initialYawMeasurement);
+            eTemporalYaw->setInformation(Eigen::Matrix<double, 1, 1>::Identity() * temporalYawWeight);
+            optimizer.addEdge(eTemporalYaw);
+
+            optimizer.initializeOptimization();
+            optimizer.optimize(10);
+
+            const Eigen::Vector4d optimizedEstimate = vObj->estimate();
+            result.position = optimizedEstimate.head<3>();
+            result.yaw = WrapAngle(optimizedEstimate[3]);
+            return result;
         }
     }
 
@@ -561,10 +817,11 @@ namespace LL_SLAM
         vector<MapObject*> vpLocalObjects = pMap->GetLocalMapObject();
         int nOptimizedObjects = 0;
         const int kMinStaticObservations = 3;
+        const double kMinObservationWeight = 0.20;
+        const double kMinYawGateRad = 15.0 * M_PI / 180.0;
+        const double kMinPositionGateMeters = 1.25;
         const double kMaxAcceptedJumpMeters = 2.0;
         const double kMaxAcceptedYawJumpRad = 35.0 * M_PI / 180.0;
-        const float kObjectPositionBlend = 0.25f;
-        const float kObjectYawBlend = 0.25f;
 
         for (MapObject *pObj : vpLocalObjects) {
             if (pObj == nullptr || pObj->isBad() || !pObj->IsStatic()) {
@@ -576,12 +833,8 @@ namespace LL_SLAM
                 continue;
             }
 
-            double sumX = 0.0;
-            double sumY = 0.0;
-            double sumZ = 0.0;
-            double sumSinYaw = 0.0;
-            double sumCosYaw = 0.0;
-            int nValidObs = 0;
+            vector<ObjectObservationEntry> vObservationEntries;
+            vObservationEntries.reserve(vObservations.size());
 
             for (const auto &obsInfo : vObservations) {
                 KeyFrame *pObsKF = obsInfo.first;
@@ -605,15 +858,21 @@ namespace LL_SLAM
                 qwo.normalize();
                 const double worldYaw = YawFromQuaternion(qwo);
 
-                sumX += static_cast<double>(worldPos.x());
-                sumY += static_cast<double>(worldPos.y());
-                sumZ += static_cast<double>(worldPos.z());
-                sumSinYaw += std::sin(worldYaw);
-                sumCosYaw += std::cos(worldYaw);
-                nValidObs++;
+                const double observationWeight = ComputeObjectObservationWeight(pObj, obs);
+                if (observationWeight < kMinObservationWeight) {
+                    continue;
+                }
+
+                ObjectObservationEntry entry;
+                entry.pKF = pObsKF;
+                entry.objectIdx = objectIdx;
+                entry.worldPos = worldPos.cast<double>();
+                entry.worldYaw = worldYaw;
+                entry.weight = observationWeight;
+                vObservationEntries.push_back(entry);
             }
 
-            if (nValidObs < kMinStaticObservations) {
+            if (vObservationEntries.size() < kMinStaticObservations) {
                 continue;
             }
 
@@ -621,23 +880,105 @@ namespace LL_SLAM
             const Eigen::Quaternionf currentRotation = pObj->GetWorldRotation();
             const double currentYaw = YawFromQuaternion(currentRotation);
 
-            const Eigen::Vector3f averagedWorldPos(static_cast<float>(sumX / nValidObs),
-                                                   static_cast<float>(sumY / nValidObs),
-                                                   static_cast<float>(sumZ / nValidObs));
-            const double averagedYaw = std::atan2(sumSinYaw, sumCosYaw);
+            std::vector<Eigen::Vector3d> vObservationPositions;
+            std::vector<double> vObservationYaws;
+            vObservationPositions.reserve(vObservationEntries.size());
+            vObservationYaws.reserve(vObservationEntries.size());
+            for (const ObjectObservationEntry &entry : vObservationEntries) {
+                vObservationPositions.push_back(entry.worldPos);
+                vObservationYaws.push_back(entry.worldYaw);
+            }
 
-            const double positionJump = (averagedWorldPos - currentWorldPos).norm();
-            const double yawJump = std::abs(WrapAngle(averagedYaw - currentYaw));
-            if (positionJump > kMaxAcceptedJumpMeters || yawJump > kMaxAcceptedYawJumpRad) {
+            const Eigen::Vector3d robustCenter = ComputeComponentMedian(vObservationPositions);
+            const double robustYaw = ComputeRobustYawReference(vObservationYaws);
+
+            std::vector<double> vPositionResiduals;
+            std::vector<double> vYawResiduals;
+            vPositionResiduals.reserve(vObservationEntries.size());
+            vYawResiduals.reserve(vObservationEntries.size());
+            for (const ObjectObservationEntry &entry : vObservationEntries) {
+                vPositionResiduals.push_back((entry.worldPos - robustCenter).norm());
+                vYawResiduals.push_back(std::abs(WrapAngle(entry.worldYaw - robustYaw)));
+            }
+
+            const double medianPosResidual = ComputeMedian(vPositionResiduals);
+            const double madPosResidual = ComputeMedianAbsDeviation(vPositionResiduals, medianPosResidual);
+            const double medianYawResidual = ComputeMedian(vYawResiduals);
+            const double madYawResidual = ComputeMedianAbsDeviation(vYawResiduals, medianYawResidual);
+            const double positionGate =
+                std::max(kMinPositionGateMeters, medianPosResidual + 2.5 * std::max(madPosResidual, 0.10));
+            const double yawGate =
+                std::max(kMinYawGateRad, medianYawResidual + 2.5 * std::max(madYawResidual, 3.0 * M_PI / 180.0));
+
+            vector<ObjectObservationEntry> vInlierObservations;
+            vInlierObservations.reserve(vObservationEntries.size());
+            for (size_t i = 0; i < vObservationEntries.size(); i++) {
+                if (vPositionResiduals[i] > positionGate) {
+                    continue;
+                }
+                if (vYawResiduals[i] > yawGate) {
+                    continue;
+                }
+                vInlierObservations.push_back(vObservationEntries[i]);
+            }
+
+            if (vInlierObservations.size() < kMinStaticObservations) {
                 continue;
             }
 
-            const Eigen::Vector3f optimizedWorldPos =
-                currentWorldPos + kObjectPositionBlend * (averagedWorldPos - currentWorldPos);
-            const float blendedYawDelta =
-                static_cast<float>(kObjectYawBlend * WrapAngle(averagedYaw - currentYaw));
+            ObjectOptimizationEstimate optimizedEstimate =
+                OptimizeObjectWithObservations(currentWorldPos.cast<double>(), currentYaw, vInlierObservations, pObj);
+
+            vector<ObjectObservationEntry> vRefinedInliers;
+            vRefinedInliers.reserve(vInlierObservations.size());
+            const double refinedPositionGate = std::max(0.75, 0.9 * positionGate);
+            const double refinedYawGate = std::max(kMinYawGateRad, 1.05 * yawGate);
+            for (const ObjectObservationEntry &entry : vInlierObservations) {
+                const double positionResidual =
+                    (optimizedEstimate.position - entry.worldPos).norm();
+                const double yawResidual =
+                    std::abs(WrapAngle(optimizedEstimate.yaw - entry.worldYaw));
+                if (positionResidual > refinedPositionGate) {
+                    continue;
+                }
+                if (yawResidual > refinedYawGate) {
+                    continue;
+                }
+                vRefinedInliers.push_back(entry);
+            }
+
+            if (vRefinedInliers.size() >= kMinStaticObservations &&
+                vRefinedInliers.size() < vInlierObservations.size()) {
+                optimizedEstimate =
+                    OptimizeObjectWithObservations(currentWorldPos.cast<double>(), currentYaw, vRefinedInliers, pObj);
+            }
+
+            const Eigen::Vector3f optimizedWorldPos = optimizedEstimate.position.cast<float>();
+            const double optimizedYaw = optimizedEstimate.yaw;
+
+            const double positionJump = (optimizedWorldPos - currentWorldPos).norm();
+            const double yawJump = std::abs(WrapAngle(optimizedYaw - currentYaw));
+            const double maturityScale = Clamp(
+                1.0 - 0.05 * std::min(pObj->GetSeenCount(), 10) - 0.30 * Clamp(pObj->GetConfidence(), 0.0, 1.0),
+                0.35,
+                1.0);
+            const double lostRelaxation = 1.0 + 0.10 * std::min(pObj->GetLostCount(), 5);
+            const double acceptedJumpMeters =
+                Clamp(kMaxAcceptedJumpMeters * maturityScale * lostRelaxation, 0.75, kMaxAcceptedJumpMeters);
+            const double acceptedYawJumpRad =
+                Clamp(kMaxAcceptedYawJumpRad * maturityScale * lostRelaxation,
+                      12.0 * M_PI / 180.0,
+                      kMaxAcceptedYawJumpRad);
+
+            if (positionJump > acceptedJumpMeters || yawJump > acceptedYawJumpRad) {
+                continue;
+            }
+
+            const Eigen::Quaternionf qYawCurrent(Eigen::AngleAxisf(static_cast<float>(currentYaw), Eigen::Vector3f::UnitY()));
+            Eigen::Quaternionf qBase = qYawCurrent.conjugate() * currentRotation.normalized();
+            qBase.normalize();
             Eigen::Quaternionf optimizedRotation =
-                Eigen::AngleAxisf(blendedYawDelta, Eigen::Vector3f::UnitY()) * currentRotation.normalized();
+                Eigen::Quaternionf(Eigen::AngleAxisf(static_cast<float>(optimizedYaw), Eigen::Vector3f::UnitY())) * qBase;
             optimizedRotation.normalize();
             pObj->SetWorldPose(optimizedWorldPos, optimizedRotation);
             nOptimizedObjects++;

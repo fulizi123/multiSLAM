@@ -19,14 +19,29 @@ namespace LL_SLAM
             }
             return true;
         }
+
+        MapObject::ObjectState ResolveObjectState(int static_count, int dynamic_count)
+        {
+            if (static_count > 0 && dynamic_count == 0) {
+                return MapObject::OBJECT_STATE_STATIC;
+            }
+            if (dynamic_count > 0 && static_count == 0) {
+                return MapObject::OBJECT_STATE_DYNAMIC;
+            }
+            return MapObject::OBJECT_STATE_UNKNOWN;
+        }
     }
 
     long unsigned int MapObject::nNextId = 0;
 
-    MapObject::MapObject(const ObjectObservation &obs, const Eigen::Matrix4f &Twb)
+    MapObject::MapObject(const ObjectObservation &obs,
+                         const Eigen::Matrix4f &Twb,
+                         double timestamp,
+                         long unsigned int keyframe_id,
+                         SourceType source_type)
     {
         mnId = nNextId++;
-        UpdateFromObservation(obs, Twb);
+        UpdateFromObservation(obs, Twb, timestamp, keyframe_id, source_type);
     }
 
     void MapObject::AddObservation(KeyFrame *pKF, int object_idx)
@@ -124,14 +139,44 @@ namespace LL_SLAM
         return nObsKF;
     }
 
-    void MapObject::UpdateFromObservation(const ObjectObservation &obs, const Eigen::Matrix4f &Twb, bool updatePose)
+    void MapObject::UpdateFromObservation(const ObjectObservation &obs,
+                                          const Eigen::Matrix4f &Twb,
+                                          double timestamp,
+                                          long unsigned int keyframe_id,
+                                          SourceType source_type,
+                                          bool updatePose)
     {
         unique_lock<mutex> lockPose(mMutexPose);
         mTrackId = obs.track_id;
         mClassId = obs.class_id;
         mfScore = obs.score;
-        mbStatic = obs.is_static;
+        mSourceType = source_type;
         mSize = obs.size;
+
+        if (mnSeenCount == 0) {
+            mFirstObservedTime = timestamp;
+            mLastObservedTime = timestamp;
+            mnFirstObservedKFId = keyframe_id;
+            mnLastObservedKFId = keyframe_id;
+            mnLastLifecycleKFId = keyframe_id;
+            mfConfidence = obs.score;
+        } else {
+            mLastObservedTime = timestamp;
+            mnLastObservedKFId = keyframe_id;
+            mnLastLifecycleKFId = keyframe_id;
+            mfConfidence = 0.7f * mfConfidence + 0.3f * obs.score;
+        }
+        mnSeenCount++;
+        mnLostCount = 0;
+        if (keyframe_id >= mnFirstObservedKFId) {
+            mnAge = int(keyframe_id - mnFirstObservedKFId);
+        }
+        if (obs.is_static) {
+            mnStaticObservationCount++;
+        } else {
+            mnDynamicObservationCount++;
+        }
+        mState = ResolveObjectState(mnStaticObservationCount, mnDynamicObservationCount);
 
         const Eigen::Matrix3f Rwb = CommonTools::T2R(Twb);
         mWorldVelocity = Rwb * obs.v_ref;
@@ -147,6 +192,28 @@ namespace LL_SLAM
         qwb.normalize();
         mWorldRotation = qwb * obs.q_ref;
         mWorldRotation.normalize();
+    }
+
+    void MapObject::MarkMissed(long unsigned int current_keyframe_id, double current_timestamp)
+    {
+        unique_lock<mutex> lockPose(mMutexPose);
+        if (mbBad || mnSeenCount <= 0) {
+            return;
+        }
+        if (current_keyframe_id <= mnLastObservedKFId) {
+            return;
+        }
+
+        if (current_keyframe_id <= mnLastLifecycleKFId) {
+            return;
+        }
+
+        mnLostCount += int(current_keyframe_id - mnLastLifecycleKFId);
+        mnLastLifecycleKFId = current_keyframe_id;
+        if (current_keyframe_id >= mnFirstObservedKFId) {
+            mnAge = int(current_keyframe_id - mnFirstObservedKFId);
+        }
+        (void)current_timestamp;
     }
 
     void MapObject::SetWorldPose(const Eigen::Vector3f &position, const Eigen::Quaternionf &rotation)
@@ -199,10 +266,82 @@ namespace LL_SLAM
         return mfScore;
     }
 
+    float MapObject::GetConfidence() const
+    {
+        unique_lock<mutex> lock(mMutexPose);
+        return mfConfidence;
+    }
+
+    int MapObject::GetSeenCount() const
+    {
+        unique_lock<mutex> lock(mMutexPose);
+        return mnSeenCount;
+    }
+
+    int MapObject::GetLostCount() const
+    {
+        unique_lock<mutex> lock(mMutexPose);
+        return mnLostCount;
+    }
+
+    int MapObject::GetAge() const
+    {
+        unique_lock<mutex> lock(mMutexPose);
+        return mnAge;
+    }
+
+    int MapObject::GetStaticObservationCount() const
+    {
+        unique_lock<mutex> lock(mMutexPose);
+        return mnStaticObservationCount;
+    }
+
+    int MapObject::GetDynamicObservationCount() const
+    {
+        unique_lock<mutex> lock(mMutexPose);
+        return mnDynamicObservationCount;
+    }
+
+    long unsigned int MapObject::GetFirstObservedKFId() const
+    {
+        unique_lock<mutex> lock(mMutexPose);
+        return mnFirstObservedKFId;
+    }
+
+    long unsigned int MapObject::GetLastObservedKFId() const
+    {
+        unique_lock<mutex> lock(mMutexPose);
+        return mnLastObservedKFId;
+    }
+
+    MapObject::ObjectState MapObject::GetState() const
+    {
+        unique_lock<mutex> lock(mMutexPose);
+        return mState;
+    }
+
+    MapObject::SourceType MapObject::GetSourceType() const
+    {
+        unique_lock<mutex> lock(mMutexPose);
+        return mSourceType;
+    }
+
     bool MapObject::IsStatic() const
     {
         unique_lock<mutex> lock(mMutexPose);
-        return mbStatic;
+        return mState == OBJECT_STATE_STATIC;
+    }
+
+    bool MapObject::IsDynamic() const
+    {
+        unique_lock<mutex> lock(mMutexPose);
+        return mState == OBJECT_STATE_DYNAMIC;
+    }
+
+    bool MapObject::IsUnknown() const
+    {
+        unique_lock<mutex> lock(mMutexPose);
+        return mState == OBJECT_STATE_UNKNOWN;
     }
 
     void MapObject::SetBadFlag()

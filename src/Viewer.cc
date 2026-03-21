@@ -84,10 +84,46 @@ namespace
         return cv::Point2f(point.x * scaleX, point.y * scaleY);
     }
 
-    cv::Scalar GetObjectColor(bool isStatic, bool emphasize)
+    LL_SLAM::MapObject::ObjectState ResolveVisualizationState(const LL_SLAM::ObjectObservation &obj,
+                                                              const LL_SLAM::MapObject *pMapObject)
     {
-        if (isStatic) {
+        if (pMapObject != nullptr && !pMapObject->isBad()) {
+            return pMapObject->GetState();
+        }
+        return obj.is_static ? LL_SLAM::MapObject::OBJECT_STATE_STATIC
+                             : LL_SLAM::MapObject::OBJECT_STATE_DYNAMIC;
+    }
+
+    LL_SLAM::MapObject *ResolveTrackedMapObject(const LL_SLAM::Frame *pFrame, int objectIdx)
+    {
+        if (pFrame == nullptr || objectIdx < 0 || objectIdx >= int(pFrame->mvObjectObservations.size())) {
+            return nullptr;
+        }
+
+        LL_SLAM::MapObject *pMapObject =
+            objectIdx < int(pFrame->mvMapObjects.size()) ? pFrame->mvMapObjects[objectIdx] : nullptr;
+        if (pMapObject != nullptr && !pMapObject->isBad()) {
+            return pMapObject;
+        }
+
+        if (pFrame->mpSystem == nullptr || pFrame->mpSystem->mpMap == nullptr) {
+            return nullptr;
+        }
+
+        const LL_SLAM::ObjectObservation &obj = pFrame->mvObjectObservations[objectIdx];
+        if (obj.track_id < 0) {
+            return nullptr;
+        }
+        return pFrame->mpSystem->mpMap->GetMapObjectByTrackId(obj.track_id);
+    }
+
+    cv::Scalar GetObjectColor(LL_SLAM::MapObject::ObjectState state, bool emphasize)
+    {
+        if (state == LL_SLAM::MapObject::OBJECT_STATE_STATIC) {
             return emphasize ? cv::Scalar(70, 235, 110) : cv::Scalar(110, 255, 160);
+        }
+        if (state == LL_SLAM::MapObject::OBJECT_STATE_UNKNOWN) {
+            return emphasize ? cv::Scalar(255, 110, 255) : cv::Scalar(235, 150, 255);
         }
         return emphasize ? cv::Scalar(40, 180, 255) : cv::Scalar(30, 110, 200);
     }
@@ -200,12 +236,9 @@ namespace
 
         for (int objectIdx = 0; objectIdx < int(pFrame->mvObjectObservations.size()); ++objectIdx) {
             const auto &obj = pFrame->mvObjectObservations[objectIdx];
-            if (obj.is_static) {
-                continue;
-            }
-            LL_SLAM::MapObject *pMapObject =
-                objectIdx < int(pFrame->mvMapObjects.size()) ? pFrame->mvMapObjects[objectIdx] : nullptr;
-            if (pMapObject != nullptr && !pMapObject->isBad() && pMapObject->IsStatic()) {
+            LL_SLAM::MapObject *pMapObject = ResolveTrackedMapObject(pFrame, objectIdx);
+            const LL_SLAM::MapObject::ObjectState state = ResolveVisualizationState(obj, pMapObject);
+            if (state == LL_SLAM::MapObject::OBJECT_STATE_STATIC) {
                 continue;
             }
             const Eigen::Vector3f worldCenter = Rwb * obj.t_ref + twb;
@@ -216,7 +249,7 @@ namespace
             DrawBevCuboid(canvas,
                           corners,
                           centerInViewer,
-                          GetObjectColor(obj.is_static, true),
+                          GetObjectColor(state, true),
                           fbl,
                           2,
                           std::to_string(obj.track_id));
@@ -237,7 +270,7 @@ namespace
             DrawBevCuboid(canvas,
                           corners,
                           center,
-                          GetObjectColor(pObj->IsStatic(), false),
+                          GetObjectColor(pObj->GetState(), false),
                           fbl,
                           2,
                           std::to_string(pObj->GetTrackId()));
@@ -248,7 +281,8 @@ namespace
                                       const LL_SLAM::Frame *pFrame,
                                       int camIndex,
                                       const cv::Size &sourceSize,
-                                      const LL_SLAM::ObjectObservation &obj)
+                                      const LL_SLAM::ObjectObservation &obj,
+                                      const LL_SLAM::MapObject *pMapObject)
     {
         if (preview.empty() || sourceSize.width <= 0 || sourceSize.height <= 0) {
             return;
@@ -279,7 +313,8 @@ namespace
             return cv::Point(cvRound(previewPoint.x), cvRound(previewPoint.y));
         };
 
-        const cv::Scalar color = GetObjectColor(obj.is_static, true);
+        const LL_SLAM::MapObject::ObjectState state = ResolveVisualizationState(obj, pMapObject);
+        const cv::Scalar color = GetObjectColor(state, true);
         int drawnEdges = 0;
         for (const auto &edge : edges) {
             Eigen::Vector3f p0 = cornersCam[edge[0]];
@@ -720,15 +755,31 @@ namespace LL_SLAM
         }
         {
             int nStaticObjects = 0;
-            for (const auto &obj : pCurrentFrame->mvObjectObservations) {
-                if (obj.is_static) {
+            int nDynamicObjects = 0;
+            int nUnknownObjects = 0;
+            std::vector<LL_SLAM::MapObject*> vMapObjects;
+            {
+                unique_lock<mutex> lock(mpSystem->mpMap->mMutexUpdate);
+                vMapObjects = mpSystem->mpMap->mvpObjectObservations;
+            }
+            for (LL_SLAM::MapObject *pObj : vMapObjects) {
+                if (pObj == nullptr || pObj->isBad()) {
+                    continue;
+                }
+                if (pObj->IsStatic()) {
                     nStaticObjects++;
+                } else if (pObj->IsDynamic()) {
+                    nDynamicObjects++;
+                } else {
+                    nUnknownObjects++;
                 }
             }
             std::stringstream s;
             s << "obj obs : " << pCurrentFrame->mvObjectObservations.size()
               << " static : " << nStaticObjects
-              << " map obj : " << mpSystem->mpMap->mvpObjectObservations.size();
+              << " dynamic : " << nDynamicObjects
+              << " unknown : " << nUnknownObjects
+              << " map obj : " << vMapObjects.size();
             cv::putText(img_map, s.str(), cv::Point(12, 24), cv::FONT_HERSHEY_PLAIN, 1.2,
                         cv::Scalar(220, 220, 220), 1, cv::LINE_AA);
         }
@@ -802,15 +853,19 @@ namespace LL_SLAM
                     }
                 }
 
-                for (const auto &obj : pCurrentFrame->mvObjectObservations) {
-                    DrawProjectedCuboidOnPreview(imShowCami, pCurrentFrame, CamIndex, cameraSourceSize, obj);
+                for (int objectIdx = 0; objectIdx < int(pCurrentFrame->mvObjectObservations.size()); ++objectIdx) {
+                    const auto &obj = pCurrentFrame->mvObjectObservations[objectIdx];
+                    LL_SLAM::MapObject *pMapObject = ResolveTrackedMapObject(pCurrentFrame, objectIdx);
+                    DrawProjectedCuboidOnPreview(imShowCami, pCurrentFrame, CamIndex, cameraSourceSize, obj, pMapObject);
                 }
 
                 CopyPreviewToCanvas(imShowCami, img_map, vImShowPos[cami].first, vImShowPos[cami].second);
             }
         } else {
-            for (const auto &obj : pCurrentFrame->mvObjectObservations) {
-                DrawProjectedCuboidOnPreview(imShow, pCurrentFrame, 0, baseSourceSize, obj);
+            for (int objectIdx = 0; objectIdx < int(pCurrentFrame->mvObjectObservations.size()); ++objectIdx) {
+                const auto &obj = pCurrentFrame->mvObjectObservations[objectIdx];
+                LL_SLAM::MapObject *pMapObject = ResolveTrackedMapObject(pCurrentFrame, objectIdx);
+                DrawProjectedCuboidOnPreview(imShow, pCurrentFrame, 0, baseSourceSize, obj, pMapObject);
             }
             CopyPreviewToCanvas(imShow, img_map, 0, 0);
         }

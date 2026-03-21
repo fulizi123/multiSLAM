@@ -115,6 +115,69 @@ namespace LL_SLAM
             sort(vSelected.begin(), vSelected.end());
             return vSelected;
         }
+
+        float WrapAngle(float angle)
+        {
+            const float kPi = 3.14159265358979323846f;
+            while (angle > kPi) {
+                angle -= 2.0f * kPi;
+            }
+            while (angle < -kPi) {
+                angle += 2.0f * kPi;
+            }
+            return angle;
+        }
+
+        float YawFromQuaternion(const Eigen::Quaternionf &q)
+        {
+            Eigen::Matrix3f R = q.normalized().toRotationMatrix();
+            Eigen::Vector3f forward = R.col(0);
+            return std::atan2(forward.x(), forward.z());
+        }
+
+        bool AreLikelyDuplicateObjects(MapObject *pPrimary, MapObject *pSecondary)
+        {
+            if (pPrimary == nullptr || pSecondary == nullptr || pPrimary == pSecondary) {
+                return false;
+            }
+            if (pPrimary->isBad() || pSecondary->isBad()) {
+                return false;
+            }
+            if (pPrimary->GetClassId() != pSecondary->GetClassId()) {
+                return false;
+            }
+            if (pPrimary->IsDynamic() || pSecondary->IsDynamic()) {
+                return false;
+            }
+
+            const Eigen::Vector3f sizePrimary = pPrimary->GetSize();
+            const Eigen::Vector3f sizeSecondary = pSecondary->GetSize();
+            const float sizeNormPrimary = sizePrimary.norm();
+            const float sizeNormSecondary = sizeSecondary.norm();
+            const float maxSizeNorm = std::max(sizeNormPrimary, sizeNormSecondary);
+            if (maxSizeNorm <= 1e-4f) {
+                return false;
+            }
+
+            const float positionDistance = (pPrimary->GetWorldPos() - pSecondary->GetWorldPos()).norm();
+            if (positionDistance > 0.75f) {
+                return false;
+            }
+
+            const float sizeDistance = (sizePrimary - sizeSecondary).norm() / maxSizeNorm;
+            if (sizeDistance > 0.30f) {
+                return false;
+            }
+
+            const float yawDistance = std::abs(WrapAngle(
+                YawFromQuaternion(pPrimary->GetWorldRotation()) -
+                YawFromQuaternion(pSecondary->GetWorldRotation())));
+            if (yawDistance > 25.0f / 180.0f * 3.14159265358979323846f) {
+                return false;
+            }
+
+            return true;
+        }
     }
 
     LocalMapping::LocalMapping(System *pSystem) {
@@ -159,25 +222,43 @@ namespace LL_SLAM
         }
 
         const Eigen::Matrix4f Twb = pCurrentKF->GetTwb();
+        std::unordered_set<int> usObservedTrackIds;
+        usObservedTrackIds.reserve(pCurrentKF->mvObjectObservations.size());
         for (int object_idx = 0; object_idx < int(pCurrentKF->mvObjectObservations.size()); object_idx++) {
             const ObjectObservation &obs = pCurrentKF->mvObjectObservations[object_idx];
             if (obs.track_id < 0) {
                 continue;
             }
+            if (!usObservedTrackIds.insert(obs.track_id).second) {
+                continue;
+            }
             if (obs.is_static) {
                 stats.current_static_obs++;
+            } else {
+                stats.current_dynamic_obs++;
             }
 
             MapObject *pObj = mpMap->GetMapObjectByTrackId(obs.track_id);
             if (pObj == nullptr) {
-                pObj = new MapObject(obs, Twb);
+                pObj = new MapObject(
+                    obs,
+                    Twb,
+                    pCurrentKF->mTimeStamp,
+                    pCurrentKF->mnId,
+                    MapObject::OBJECT_SOURCE_OBJECT_BIN);
                 mpMap->AddMapObject(pObj);
                 stats.new_mapobject++;
             } else {
                 // Keep existing static map-object poses stable. Their pose is refined separately
                 // by object optimization instead of being reset by each new keyframe observation.
-                const bool updatePose = !obs.is_static;
-                pObj->UpdateFromObservation(obs, Twb, updatePose);
+                const bool updatePose = !(pObj->IsStatic() && obs.is_static);
+                pObj->UpdateFromObservation(
+                    obs,
+                    Twb,
+                    pCurrentKF->mTimeStamp,
+                    pCurrentKF->mnId,
+                    MapObject::OBJECT_SOURCE_OBJECT_BIN,
+                    updatePose);
                 stats.updated_mapobject++;
             }
             pObj->AddObservation(pCurrentKF, object_idx);
@@ -187,10 +268,19 @@ namespace LL_SLAM
         {
             unique_lock<mutex> lock(mpMap->mMutexUpdate);
             for (MapObject *pObj : mpMap->mvpObjectObservations) {
-                if (pObj == nullptr || pObj->isBad() || !pObj->IsStatic()) {
+                if (pObj == nullptr || pObj->isBad()) {
                     continue;
                 }
-                stats.global_static_mapobject++;
+                if (usObservedTrackIds.count(pObj->GetTrackId()) == 0) {
+                    pObj->MarkMissed(pCurrentKF->mnId, pCurrentKF->mTimeStamp);
+                }
+                if (pObj->IsStatic()) {
+                    stats.global_static_mapobject++;
+                } else if (pObj->IsDynamic()) {
+                    stats.global_dynamic_mapobject++;
+                } else {
+                    stats.global_unknown_mapobject++;
+                }
             }
         }
         return stats;
@@ -234,6 +324,104 @@ namespace LL_SLAM
             }
             if (age >= 2 && nKFObs < 2) {
                 pMP->SetBadFlag();
+            }
+        }
+    }
+
+    void LocalMapping::MapObjectCulling(KeyFrame *pCurrentKF)
+    {
+        if (pCurrentKF == nullptr) {
+            return;
+        }
+
+        vector<MapObject*> vpObjects;
+        {
+            unique_lock<mutex> lock(mpMap->mMutexUpdate);
+            vpObjects = mpMap->mvpObjectObservations;
+        }
+
+        const int kMaxDynamicLostKFs = 3;
+        const int kMaxStaticLostKFs = 15;
+        const int kMinAgeForWeakObjectCull = 5;
+        const int kMinUnknownObservations = 3;
+        const int kMinStaticObservations = 2;
+        const float kMinConfidenceToKeep = 0.15f;
+
+        for (MapObject *pObj : vpObjects) {
+            if (pObj == nullptr || pObj->isBad()) {
+                continue;
+            }
+
+            const int seenCount = pObj->GetSeenCount();
+            const int lostCount = pObj->GetLostCount();
+            const int age = pObj->GetAge();
+            const float confidence = pObj->GetConfidence();
+
+            if (seenCount <= 1 && age >= 2) {
+                pObj->SetBadFlag();
+                continue;
+            }
+            if (pObj->IsDynamic() && lostCount >= kMaxDynamicLostKFs) {
+                pObj->SetBadFlag();
+                continue;
+            }
+            if ((pObj->IsStatic() || pObj->IsUnknown()) && lostCount >= kMaxStaticLostKFs) {
+                pObj->SetBadFlag();
+                continue;
+            }
+            if (age >= kMinAgeForWeakObjectCull && confidence < kMinConfidenceToKeep && seenCount < 3) {
+                pObj->SetBadFlag();
+                continue;
+            }
+            if (pObj->IsStatic() && age >= kMinAgeForWeakObjectCull &&
+                pObj->GetStaticObservationCount() < kMinStaticObservations) {
+                pObj->SetBadFlag();
+                continue;
+            }
+            if (pObj->IsUnknown() && age >= kMinAgeForWeakObjectCull &&
+                seenCount < kMinUnknownObservations) {
+                pObj->SetBadFlag();
+            }
+        }
+
+        for (int i = 0; i < int(vpObjects.size()); i++) {
+            MapObject *pPrimary = vpObjects[i];
+            if (pPrimary == nullptr || pPrimary->isBad() || pPrimary->IsDynamic()) {
+                continue;
+            }
+            for (int j = i + 1; j < int(vpObjects.size()); j++) {
+                MapObject *pSecondary = vpObjects[j];
+                if (pSecondary == nullptr || pSecondary->isBad() || pSecondary->IsDynamic()) {
+                    continue;
+                }
+                if (!AreLikelyDuplicateObjects(pPrimary, pSecondary)) {
+                    continue;
+                }
+
+                MapObject *pKeep = pPrimary;
+                MapObject *pDrop = pSecondary;
+                if (pSecondary->GetSeenCount() > pPrimary->GetSeenCount() ||
+                    (pSecondary->GetSeenCount() == pPrimary->GetSeenCount() &&
+                     pSecondary->GetConfidence() > pPrimary->GetConfidence()) ||
+                    (pSecondary->GetSeenCount() == pPrimary->GetSeenCount() &&
+                     std::abs(pSecondary->GetConfidence() - pPrimary->GetConfidence()) < 1e-4f &&
+                     pSecondary->mnId < pPrimary->mnId)) {
+                    pKeep = pSecondary;
+                    pDrop = pPrimary;
+                }
+
+                const bool weakYoungDuplicate =
+                    pDrop->GetSeenCount() <= 2 ||
+                    pDrop->GetAge() <= 2 ||
+                    pDrop->GetLostCount() >= 2 ||
+                    pDrop->GetConfidence() < 0.20f;
+                const bool strongAnchor =
+                    pKeep->GetSeenCount() >= 3 &&
+                    pKeep->GetSeenCount() >= pDrop->GetSeenCount();
+
+                if (!pDrop->isBad() && weakYoungDuplicate && strongAnchor) {
+                    pDrop->SetBadFlag();
+                }
             }
         }
     }
@@ -522,9 +710,12 @@ namespace LL_SLAM
         }
         const MapObjectUpdateStats objectStats = CreateOrUpdateMapObjects(pKF);
         cout << "MapObject debug current_static_obs : " << objectStats.current_static_obs
+             << " current_dynamic_obs : " << objectStats.current_dynamic_obs
              << " new_mapobject : " << objectStats.new_mapobject
              << " updated_mapobject : " << objectStats.updated_mapobject
              << " global_static_mapobject : " << objectStats.global_static_mapobject
+             << " global_dynamic_mapobject : " << objectStats.global_dynamic_mapobject
+             << " global_unknown_mapobject : " << objectStats.global_unknown_mapobject
              << endl;
         pKF->UpdateConnections();
         cout << "Debug mMutexUpdate 1 "  << endl ;
@@ -569,6 +760,8 @@ namespace LL_SLAM
         }
 
         MapPointCulling(pKF);
+        mpMap->UpdateLocalMap(pKF);
+        MapObjectCulling(pKF);
         mpMap->UpdateLocalMap(pKF);
         KeyFrameCulling(pKF);
         mpMap->UpdateLocalMap(pKF);

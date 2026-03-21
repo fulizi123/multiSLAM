@@ -11,7 +11,7 @@ SequencePath: "/data/code/carla/dataset_nusc_0307_1704_carla"
 
 
 SequenceBegin: 0
-SequenceEnd: 400
+SequenceEnd: 1200
 
 SpeedUp: 0.5
 ##"distortion": [-0.3121, 0.1024, 0.00032953, -0.00039793, -0.0158]}
