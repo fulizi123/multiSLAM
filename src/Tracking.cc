@@ -41,7 +41,8 @@ namespace LL_SLAM
 
     Eigen::Matrix4f Tracking::GrabImageMultiCamera(const vector<cv::Mat> &vImCams, const double &timestamp,
                                                    vector<vector<vector<int>>> * pvKeyPoints , vector<vector<vector<float>>> * pvDescriptor,
-                                                   vector<ObjectObservation> * pvObjectObservations)
+                                                   vector<ObjectObservation> * pvObjectObservations,
+                                                   CarlaTopologyStatus * pCarlaTopologyStatus)
     {
 
         vector<cv::Mat> vImGrayCams(vImCams.size());
@@ -54,7 +55,7 @@ namespace LL_SLAM
 
         std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
         /////////////////
-        mpCurrentFrame = new Frame(vImCams, vImGrayCams,pvKeyPoints,pvDescriptor,pvObjectObservations,timestamp,mvpFeatureExtractor,mpSystem);
+        mpCurrentFrame = new Frame(vImCams, vImGrayCams, pvKeyPoints, pvDescriptor, pvObjectObservations, pCarlaTopologyStatus, timestamp, mvpFeatureExtractor, mpSystem);
         /////////////////
         std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
         cout << "Frame use time : " << std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count() * 1000.0 << " ms." << endl;
@@ -75,6 +76,8 @@ namespace LL_SLAM
     void Tracking::Track() {
         unique_lock<mutex> lockSystem(mpSystem->mMutexUpdate);
         unique_lock<mutex> lockTracking(mMutexUpdate);
+
+        mbCurrentFrameSaveViewerSnapshot = false;
 
         if (mState == NO_IMAGES_YET) {
             mState = NOT_INITIALIZED;
@@ -114,8 +117,10 @@ namespace LL_SLAM
 
         }
 
-        if (NeedNewKeyFrame()) {
+        const bool bNeedNewKeyFrame = NeedNewKeyFrame();
+        if (bNeedNewKeyFrame) {
         //    CreateNewKeyFrame();
+            mbCurrentFrameSaveViewerSnapshot = true;
             mpLocalMapper->InsertFrame(mpCurrentFrame);
             mpCurrentFrame->mbCanBeRelease = false;
             //usleep(400 * 1000);
@@ -163,6 +168,7 @@ namespace LL_SLAM
 
         //mpReferenceKF
         mpReferenceKF = pKF;
+        mbCurrentFrameSaveViewerSnapshot = true;
 
         mpMap->UpdateLocalMap(pKF);
 
@@ -251,7 +257,8 @@ namespace LL_SLAM
 
 
     void Tracking::Visualization(const vector<cv::Mat> &vImCams) {
-        mpViewer->InsertFrame(vImCams, mpCurrentFrame);
+        mpViewer->InsertFrame(vImCams, mpCurrentFrame, mbCurrentFrameSaveViewerSnapshot);
+        mbCurrentFrameSaveViewerSnapshot = false;
 //        mpViewer->Visualization(vImCams, mpCurrentFrame);
 
         return;

@@ -3,10 +3,26 @@
 #include "MapObject.h"
 
 #include <array>
+#include <cerrno>
+#include <iomanip>
+#include <sstream>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unordered_set>
 
 namespace
 {
+    bool EnsureDirectory(const std::string &path)
+    {
+        if (path.empty()) {
+            return false;
+        }
+        if (mkdir(path.c_str(), 0777) == 0) {
+            return true;
+        }
+        return errno == EEXIST;
+    }
+
     cv::Mat MakePreviewImage(const cv::Mat &image, const cv::Size &targetSize)
     {
         cv::Mat preview;
@@ -127,6 +143,112 @@ namespace
         }
         return emphasize ? cv::Scalar(40, 180, 255) : cv::Scalar(30, 110, 200);
     }
+    cv::Scalar GetTopologySemanticColor(const LL_SLAM::CarlaTopologyStatus &status)
+    {
+        if (status.is_junction) {
+            return cv::Scalar(170, 220, 255);
+        }
+
+        const unsigned int seed = static_cast<unsigned int>(status.road_id) * 2654435761u;
+        const int blue = 170 + int(seed & 0x1F);
+        const int green = 175 + int((seed >> 5) & 0x1F);
+        const int red = 180 + int((seed >> 10) & 0x1F);
+        return cv::Scalar(blue, green, red);
+    }
+
+    std::vector<cv::Point> BuildTopologySemanticSegmentPolygon(
+        const Eigen::Matrix4f &TwbPrev,
+        const Eigen::Matrix4f &TwbCurr,
+        const Eigen::Vector3f &viewerPos,
+        float fbl,
+        const cv::Size &canvasSize)
+    {
+        std::vector<cv::Point> polygon;
+        if (canvasSize.width <= 0 || canvasSize.height <= 0 || fbl <= 1e-6f) {
+            return polygon;
+        }
+
+        const float halfWidth = 7.0f;
+        const Eigen::Matrix3f RwbPrev = LL_SLAM::CommonTools::T2R(TwbPrev);
+        const Eigen::Matrix3f RwbCurr = LL_SLAM::CommonTools::T2R(TwbCurr);
+        const Eigen::Vector3f twbPrev = LL_SLAM::CommonTools::T2t(TwbPrev);
+        const Eigen::Vector3f twbCurr = LL_SLAM::CommonTools::T2t(TwbCurr);
+
+        const Eigen::Vector3f prevLeft = RwbPrev * Eigen::Vector3f(-halfWidth, 0.0f, 0.0f) + twbPrev - viewerPos;
+        const Eigen::Vector3f prevRight = RwbPrev * Eigen::Vector3f(halfWidth, 0.0f, 0.0f) + twbPrev - viewerPos;
+        const Eigen::Vector3f currLeft = RwbCurr * Eigen::Vector3f(-halfWidth, 0.0f, 0.0f) + twbCurr - viewerPos;
+        const Eigen::Vector3f currRight = RwbCurr * Eigen::Vector3f(halfWidth, 0.0f, 0.0f) + twbCurr - viewerPos;
+
+        auto toCanvas = [&](const Eigen::Vector3f &p) -> cv::Point {
+            return cv::Point(
+                int(p.x() / fbl + canvasSize.width * 0.5f),
+                int(-p.z() / fbl + canvasSize.height * 0.5f)
+            );
+        };
+
+        polygon.reserve(4);
+        polygon.push_back(toCanvas(prevLeft));
+        polygon.push_back(toCanvas(prevRight));
+        polygon.push_back(toCanvas(currRight));
+        polygon.push_back(toCanvas(currLeft));
+        return polygon;
+    }
+
+    void DrawTopologySemanticBackground(cv::Mat &canvas,
+                                        const std::vector<Eigen::Matrix4f> &twbs,
+                                        const std::vector<LL_SLAM::CarlaTopologyStatus> &statusHistory,
+                                        const Eigen::Vector3f &viewerPos,
+                                        float fbl)
+    {
+        if (canvas.empty() || twbs.size() < 2 || statusHistory.size() < 2) {
+            return;
+        }
+
+        const size_t n = std::min(twbs.size(), statusHistory.size());
+        cv::Mat overlay = canvas.clone();
+        bool hasSemanticRibbon = false;
+        for (size_t i = 1; i < n; ++i) {
+            const LL_SLAM::CarlaTopologyStatus &status = statusHistory[i];
+            if (!status.valid) {
+                continue;
+            }
+            const std::vector<cv::Point> polygon = BuildTopologySemanticSegmentPolygon(
+                twbs[i - 1], twbs[i], viewerPos, fbl, canvas.size());
+            if (polygon.size() < 4) {
+                continue;
+            }
+            cv::fillConvexPoly(overlay, polygon, GetTopologySemanticColor(status), cv::LINE_AA);
+            hasSemanticRibbon = true;
+        }
+
+        if (hasSemanticRibbon) {
+            cv::addWeighted(overlay, 0.30, canvas, 0.70, 0.0, canvas);
+        }
+    }
+
+    void DrawTopologySemanticLegend(cv::Mat &canvas, const LL_SLAM::Frame *pFrame)
+    {
+        if (canvas.empty() || pFrame == nullptr || !pFrame->mCarlaTopologyStatus.valid) {
+            return;
+        }
+
+        const LL_SLAM::CarlaTopologyStatus &status = pFrame->mCarlaTopologyStatus;
+        std::ostringstream oss;
+        oss << "topo : " << (status.is_junction ? "junction" : "road")
+            << " road : " << status.road_id
+            << " lane : " << status.lane_id
+            << " sec : " << status.section_id;
+        if (status.is_junction) {
+            oss << " jid : " << status.junction_id;
+        } else if (status.next_junction_distance_m >= 0.0f) {
+            oss << std::fixed << std::setprecision(1)
+                << " jdist : " << status.next_junction_distance_m;
+        }
+
+        cv::putText(canvas, oss.str(), cv::Point(12, 44), cv::FONT_HERSHEY_PLAIN, 1.15,
+                    cv::Scalar(215, 215, 215), 1, cv::LINE_AA);
+    }
+
 
     std::vector<int> SelectSurroundPreviewCameras(const LL_SLAM::Frame *pFrame)
     {
@@ -450,6 +572,24 @@ namespace LL_SLAM
     Viewer::Viewer(System *pSystem) {
         mpSystem = pSystem;
 
+        cv::FileNode fnSaveSnapshots = mpSystem->mSettings["Viewer.SaveKeyFrameSnapshots"];
+        if (!fnSaveSnapshots.empty()) {
+            mbSaveKeyFrameSnapshots = int(fnSaveSnapshots) != 0;
+        }
+
+        if (mbSaveKeyFrameSnapshots) {
+            std::string sequencePath = mpSystem->mSettings["SequencePath"];
+            if (!sequencePath.empty()) {
+                mKeyFrameSnapshotDir = sequencePath + "/KeyFrameVisualization";
+                if (!EnsureDirectory(mKeyFrameSnapshotDir)) {
+                    cout << "[Viewer] Failed to create keyframe snapshot directory: " << mKeyFrameSnapshotDir << endl;
+                    mbSaveKeyFrameSnapshots = false;
+                }
+            } else {
+                mbSaveKeyFrameSnapshots = false;
+            }
+        }
+
         if (mMp4LayoutMode == MP4_LAYOUT_SURROUND_8) {
             mWidth = mSurroundWidth;
             mHeight = mSurroundHeight;
@@ -490,15 +630,25 @@ namespace LL_SLAM
             } else {
                 vector<cv::Mat> vImCams;
                 Frame *pCurrentFrame;
+                bool bSaveSnapshot = false;
                 {
                     unique_lock<mutex> lock(mMutexMsg);
-                    vImCams = mvvImCams.front();
-                    pCurrentFrame = mvpFrame.front();
+                    size_t selectedIdx = mvvImCams.size() - 1;
+                    for (size_t i = mvSaveSnapshotFlags.size(); i-- > 0;) {
+                        if (mvSaveSnapshotFlags[i]) {
+                            selectedIdx = i;
+                            break;
+                        }
+                    }
+                    vImCams = mvvImCams[selectedIdx];
+                    pCurrentFrame = mvpFrame[selectedIdx];
+                    bSaveSnapshot = mvSaveSnapshotFlags[selectedIdx];
                     mvvImCams.clear();
                     mvpFrame.clear();
+                    mvSaveSnapshotFlags.clear();
                 }
 
-                Visualization(vImCams, pCurrentFrame);
+                Visualization(vImCams, pCurrentFrame, bSaveSnapshot);
 
 //                VisualizationYZ(vImCams, pCurrentFrame);
 //
@@ -508,13 +658,14 @@ namespace LL_SLAM
     }
 
 
-    void Viewer::InsertFrame(const vector<cv::Mat> &vImCams, Frame *pCurrentFrame)
+    void Viewer::InsertFrame(const vector<cv::Mat> &vImCams, Frame *pCurrentFrame, bool bSaveSnapshot)
     {
         // return;
 //        cout << "InsertFrame " << endl;
         unique_lock<mutex> lock(mMutexMsg);
         mvvImCams.push_back(vImCams);
         mvpFrame.push_back(pCurrentFrame);
+        mvSaveSnapshotFlags.push_back(bSaveSnapshot);
 //
 //        vector<vector<cv::Mat>> mvvImCams;
 //        vector<Frame *> mvpFrame;
@@ -524,7 +675,7 @@ namespace LL_SLAM
 
 
 
-    void Viewer::Visualization(const vector<cv::Mat> &vImCams, Frame *pCurrentFrame) {
+    void Viewer::Visualization(const vector<cv::Mat> &vImCams, Frame *pCurrentFrame, bool bSaveSnapshot) {
 
         cv::Size previewSize(480, 270);
         if (mMp4LayoutMode == MP4_LAYOUT_SURROUND_8) {
@@ -537,6 +688,7 @@ namespace LL_SLAM
 //        Eigen::Vector3f t_w_viewer = mpReferenceKF->Gettwb();
         Eigen::Vector3f t_w_viewer = pCurrentFrame->Gettwb();
         Twbs.push_back(pCurrentFrame->GetTwb());
+        mvTopologyStatusHistory.push_back(pCurrentFrame->mCarlaTopologyStatus);
 
 
         ///////visual
@@ -546,6 +698,8 @@ namespace LL_SLAM
 //        float fbl = 0.3;
         cv::Mat img_map = cv::Mat::zeros(cv::Size(w, h), CV_8UC3);
 //      img_map.at<cv::Vec3b>(i, j) = cv::Vec3b(0, 0, 0);
+
+        DrawTopologySemanticBackground(img_map, Twbs, mvTopologyStatusHistory, t_w_viewer, fbl);
 
         //connection
         for (int cam_i = 0; cam_i < pCurrentFrame->mvMapPoints.size(); cam_i++) {
@@ -783,6 +937,7 @@ namespace LL_SLAM
             cv::putText(img_map, s.str(), cv::Point(12, 24), cv::FONT_HERSHEY_PLAIN, 1.2,
                         cv::Scalar(220, 220, 220), 1, cv::LINE_AA);
         }
+        DrawTopologySemanticLegend(img_map, pCurrentFrame);
 
         //////////////////////////////////////////////////////////////////////////
 //        //debug
@@ -870,6 +1025,10 @@ namespace LL_SLAM
             CopyPreviewToCanvas(imShow, img_map, 0, 0);
         }
 
+        if (bSaveSnapshot) {
+            SaveKeyFrameVisualization(img_map, pCurrentFrame);
+        }
+
         if (mVideoWriter.isOpened()) {
             mVideoWriter.write(img_map);
         }
@@ -879,6 +1038,20 @@ namespace LL_SLAM
         // cv::waitKey(2);
     }
 
+
+    void Viewer::SaveKeyFrameVisualization(const cv::Mat &imComposite, Frame *pCurrentFrame)
+    {
+        if (!mbSaveKeyFrameSnapshots || pCurrentFrame == nullptr || imComposite.empty() || mKeyFrameSnapshotDir.empty()) {
+            return;
+        }
+
+        std::ostringstream oss;
+        oss << mKeyFrameSnapshotDir << "/" << std::setfill('0') << std::setw(6) << pCurrentFrame->mnId << ".jpg";
+        const std::string outputPath = oss.str();
+        if (!cv::imwrite(outputPath, imComposite)) {
+            cout << "[Viewer] Failed to save keyframe visualization: " << outputPath << endl;
+        }
+    }
 
     void Viewer::VisualizationYZ(const vector<cv::Mat> &vImCams, Frame *pCurrentFrame) {
 
@@ -893,6 +1066,7 @@ namespace LL_SLAM
 //        Eigen::Vector3f t_w_viewer = mpReferenceKF->Gettwb();
         Eigen::Vector3f t_w_viewer = pCurrentFrame->Gettwb();
         Twbs.push_back(pCurrentFrame->GetTwb());
+        mvTopologyStatusHistory.push_back(pCurrentFrame->mCarlaTopologyStatus);
 
 
         ///////visual
@@ -903,6 +1077,8 @@ namespace LL_SLAM
         float fbl = 0.3;
         cv::Mat img_map = cv::Mat::zeros(cv::Size(w, h), CV_8UC3);
 //      img_map.at<cv::Vec3b>(i, j) = cv::Vec3b(0, 0, 0);
+
+        DrawTopologySemanticBackground(img_map, Twbs, mvTopologyStatusHistory, t_w_viewer, fbl);
 
         //connection
         for (int cam_i = 0; cam_i < pCurrentFrame->mvMapPoints.size(); cam_i++) {
@@ -1157,6 +1333,7 @@ namespace LL_SLAM
 //        Eigen::Vector3f t_w_viewer = mpReferenceKF->Gettwb();
         Eigen::Vector3f t_w_viewer = pCurrentFrame->Gettwb();
         Twbs.push_back(pCurrentFrame->GetTwb());
+        mvTopologyStatusHistory.push_back(pCurrentFrame->mCarlaTopologyStatus);
 
 
         ///////visual
@@ -1167,6 +1344,8 @@ namespace LL_SLAM
 //        float fbl = 0.3;
         cv::Mat img_map = cv::Mat::zeros(cv::Size(w, h), CV_8UC3);
 //      img_map.at<cv::Vec3b>(i, j) = cv::Vec3b(0, 0, 0);
+
+        DrawTopologySemanticBackground(img_map, Twbs, mvTopologyStatusHistory, t_w_viewer, fbl);
 
         //connection
         for (int cam_i = 0; cam_i < pCurrentFrame->mvMapPoints.size(); cam_i++) {

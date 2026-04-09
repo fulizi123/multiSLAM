@@ -12,7 +12,7 @@ namespace LL_SLAM
     int Frame::FRAME_GRID_COLS = 128;
 
     Frame::Frame(const vector<cv::Mat> &vImColorCams, const vector<cv::Mat> &vImCams, vector<vector<vector<int>>> * pvKeyPoints, vector<vector<vector<float>>> * pvDescriptor,
-            vector<ObjectObservation> * pvObjectObservations, const double &timeStamp,
+            vector<ObjectObservation> * pvObjectObservations, CarlaTopologyStatus * pCarlaTopologyStatus, const double &timeStamp,
             vector<FeatureExtractor*> vextractors, System *pSystem)
     {
         mTimeStamp = timeStamp;
@@ -43,6 +43,9 @@ namespace LL_SLAM
         mvWidthHeight.resize(mNumCam);
         if (pvObjectObservations != nullptr) {
             mvObjectObservations = *pvObjectObservations;
+        }
+        if (pCarlaTopologyStatus != nullptr) {
+            mCarlaTopologyStatus = *pCarlaTopologyStatus;
         }
 
 

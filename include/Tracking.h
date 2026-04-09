@@ -14,6 +14,7 @@
 #include "Viewer.h"
 #include "Optimizer.h"
 #include "ObjectObservation.h"
+#include "CarlaTopologyStatus.h"
 namespace LL_SLAM
 {
     class System;
@@ -32,7 +33,8 @@ namespace LL_SLAM
 
         Eigen::Matrix4f GrabImageMultiCamera(const vector<cv::Mat> &vImCams, const double &timestamp,
                                              vector<vector<vector<int>>> * pvKeyPoints , vector<vector<vector<float>>> * pvDescriptor,
-                                             vector<ObjectObservation> * pvObjectObservations);
+                                             vector<ObjectObservation> * pvObjectObservations,
+                                             CarlaTopologyStatus * pCarlaTopologyStatus);
 
         void Track();
 
@@ -86,6 +88,7 @@ namespace LL_SLAM
         };
 
         eTrackingState mState;
+        bool mbCurrentFrameSaveViewerSnapshot = false;
 
         std::mutex mMutexUpdate;
     };

@@ -10,6 +10,7 @@
 #include "Map.h"
 #include "Viewer.h"
 #include "ObjectObservation.h"
+#include "CarlaTopologyStatus.h"
 
 namespace LL_SLAM
 {
@@ -27,7 +28,8 @@ namespace LL_SLAM
 
         Eigen::Matrix4f TrackMultiCamera(const vector<cv::Mat> &vImCams, const double &timestamp,
                                          vector<vector<vector<int>>> * pvKeyPoints, vector<vector<vector<float>>> * pvDescriptor,
-                                         vector<ObjectObservation> * pvObjectObservations = nullptr);
+                                         vector<ObjectObservation> * pvObjectObservations = nullptr,
+                                         CarlaTopologyStatus * pCarlaTopologyStatus = nullptr);
 
         Tracking* mpTracker;
         LocalMapping* mpLocalMapper;

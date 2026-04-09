@@ -8,6 +8,7 @@
 #include "Frame.h"
 #include "KeyFrame.h"
 #include "MapPoint.h"
+#include "CarlaTopologyStatus.h"
 
 
 namespace LL_SLAM
@@ -30,21 +31,25 @@ namespace LL_SLAM
         void Run();
         void RequestFinish();
 
-        void Visualization(const vector<cv::Mat> &vImCams, Frame *pCurrentFrame) ;
+        void Visualization(const vector<cv::Mat> &vImCams, Frame *pCurrentFrame, bool bSaveSnapshot = false) ;
 
         void VisualizationXZ(const vector<cv::Mat> &vImCams, Frame *pCurrentFrame) ;
         void VisualizationXY(const vector<cv::Mat> &vImCams, Frame *pCurrentFrame) ;
         void VisualizationYZ(const vector<cv::Mat> &vImCams, Frame *pCurrentFrame) ;
 
 
-        void InsertFrame(const vector<cv::Mat> &vImCams, Frame *pCurrentFrame) ;
+        void InsertFrame(const vector<cv::Mat> &vImCams, Frame *pCurrentFrame, bool bSaveSnapshot = false) ;
+
+        void SaveKeyFrameVisualization(const cv::Mat &imComposite, Frame *pCurrentFrame) ;
 
         vector<vector<cv::Mat>> mvvImCams;
         vector<Frame *> mvpFrame;
+        vector<bool> mvSaveSnapshotFlags;
         std::mutex mMutexMsg;
         bool mbFinishRequested = false;
 
         vector<Eigen::Matrix4f> Twbs;
+        vector<CarlaTopologyStatus> mvTopologyStatusHistory;
 
         System *mpSystem;
         cv::VideoWriter mVideoWriter;
@@ -55,6 +60,8 @@ namespace LL_SLAM
         int mSurroundHeight = 1300;
         int mWidth = 1000;
         int mHeight = 720;
+        bool mbSaveKeyFrameSnapshots = true;
+        std::string mKeyFrameSnapshotDir;
     };
 
 }

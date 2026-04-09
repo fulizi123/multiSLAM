@@ -11,7 +11,7 @@ SequencePath: "/data/code/carla/dataset_nusc_0307_1704_carla"
 
 
 SequenceBegin: 0
-SequenceEnd: 1200
+SequenceEnd: 500
 
 SpeedUp: 0.5
 ##"distortion": [-0.3121, 0.1024, 0.00032953, -0.00039793, -0.0158]}
@@ -87,6 +87,7 @@ Viewer.ViewpointX: 0
 Viewer.ViewpointY: -100
 Viewer.ViewpointZ: -0.1
 Viewer.ViewpointF: 2000
+Viewer.SaveKeyFrameSnapshots: 1
 
 
 

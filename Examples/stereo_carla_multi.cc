@@ -26,6 +26,7 @@
 
 #include<System.h>
 #include<ObjectObservation.h>
+#include<CarlaTopologyStatus.h>
 //#include<Converter.h>
 #include "Thirdparty/Sophus/sophus/geometry.hpp"
 
@@ -38,6 +39,7 @@ queue<vector<cv::Mat> *> qpvImCams ;
 queue<vector<vector<vector<int>>> *> qpvKeyPoints ;
 queue<vector<vector<vector<float>>> *> qpvDescriptor ;
 queue<vector<LL_SLAM::ObjectObservation> *> qpvObjectObservations ;
+queue<LL_SLAM::CarlaTopologyStatus *> qpvCarlaTopologyStatus ;
 
 std::mutex MutexMsg;
 queue<cv::Mat> qImCam00 ;
@@ -79,6 +81,7 @@ queue<vector<vector<float>>> qDescriptor09 ;
 queue<vector<vector<float>>> qDescriptor10 ;
 queue<vector<vector<float>>> qDescriptor11 ;
 queue<vector<LL_SLAM::ObjectObservation>> qObjectObservations;
+queue<LL_SLAM::CarlaTopologyStatus> qCarlaTopologyStatus;
 
 
 
@@ -116,6 +119,9 @@ void LoadXFeatPaths(const string &strPathToSequence,
 void LoadObjectTrackPaths(const string &strPathToSequence, vector<string> &vstrObjectTrack);
 void getObjectTrack(const string &frameBinDir, vector<LL_SLAM::ObjectObservation> &vObjects);
 void LoadObjectTrackMultiThread(vector<string> vstrObjectTrack, queue<vector<LL_SLAM::ObjectObservation>> *qObjectTrackxx);
+void LoadCarlaTopologyStatusPaths(const string &strPathToSequence, vector<string> &vstrCarlaTopologyStatus);
+void getCarlaTopologyStatus(const string &frameBinDir, LL_SLAM::CarlaTopologyStatus &status);
+void LoadCarlaTopologyStatusMultiThread(vector<string> vstrCarlaTopologyStatus, queue<LL_SLAM::CarlaTopologyStatus> *qCarlaTopologyStatusxx);
 
 void getSuperPoint(std::string frameBinDir, std::vector<std::vector<int>> &vKeyPoints, std::vector<std::vector<float>> &vDescriptors){
     //return ;
@@ -280,7 +286,7 @@ void LoadInputMultiThread (int N) {
                 qDescriptor03.size() > 0 &&qDescriptor04.size() > 0 &&qDescriptor05.size() > 0 &&
                 qDescriptor06.size() > 0 &&qDescriptor07.size() > 0 &&qDescriptor08.size() > 0 &&
                 qDescriptor09.size() > 0 &&qDescriptor10.size() > 0 &&qDescriptor11.size() > 0 &&
-                qObjectObservations.size() > 0 )
+                qObjectObservations.size() > 0 && qCarlaTopologyStatus.size() > 0 )
             {
                 i++;
                 {
@@ -305,6 +311,8 @@ void LoadInputMultiThread (int N) {
 
                     vector<LL_SLAM::ObjectObservation> *pvObjectObservations =
                                 new vector<LL_SLAM::ObjectObservation>(qObjectObservations.front());
+                    LL_SLAM::CarlaTopologyStatus *pCarlaTopologyStatus =
+                                new LL_SLAM::CarlaTopologyStatus(qCarlaTopologyStatus.front());
 //                    vector<cv::Mat> *pvImCams = new vector<cv::Mat>({ qImCam00.front(), qImCam01.front(), qImCam02.front()});
 //
 //                    vector<vector<vector<int>>> *pvKeyPoints = new vector<vector<vector<int>>>({ qKeyPoint00.front(), qKeyPoint01.front(), qKeyPoint02.front() });
@@ -315,6 +323,7 @@ void LoadInputMultiThread (int N) {
                     qpvKeyPoints.push(pvKeyPoints);
                     qpvDescriptor.push(pvDescriptor);
                     qpvObjectObservations.push(pvObjectObservations);
+                    qpvCarlaTopologyStatus.push(pCarlaTopologyStatus);
 
                     qImCam00.pop(); qImCam01.pop(); qImCam02.pop();
                     qImCam03.pop(); qImCam04.pop(); qImCam05.pop();
@@ -329,6 +338,7 @@ void LoadInputMultiThread (int N) {
                     qDescriptor06.pop();qDescriptor07.pop();qDescriptor08.pop();
                     qDescriptor09.pop();qDescriptor10.pop();qDescriptor11.pop();
                     qObjectObservations.pop();
+                    qCarlaTopologyStatus.pop();
                 }
             }
 
@@ -478,6 +488,9 @@ int main(int argc, char **argv)
     vector<string> vstrObjectTrack;
     LoadObjectTrackPaths(SequencePath, vstrObjectTrack);
 
+    vector<string> vstrCarlaTopologyStatus;
+    LoadCarlaTopologyStatusPaths(SequencePath, vstrCarlaTopologyStatus);
+
     // // 新建变量来存储 XFeat 的文件路径
     // vector <string> vstrXFeatCam00, vstrXFeatCam01, vstrXFeatCam02;
     // vector <string> vstrXFeatCam03, vstrXFeatCam04, vstrXFeatCam05;
@@ -533,6 +546,7 @@ int main(int argc, char **argv)
     std::thread *mptLoadSuperPointMultiThread10 = new thread(&LoadSuperPointMultiThread, vstrSuperPointCam10, &qKeyPoint10, &qDescriptor10);
     std::thread *mptLoadSuperPointMultiThread11 = new thread(&LoadSuperPointMultiThread, vstrSuperPointCam11, &qKeyPoint11, &qDescriptor11);
     std::thread *mptLoadObjectTrackMultiThread = new thread(&LoadObjectTrackMultiThread, vstrObjectTrack, &qObjectObservations);
+    std::thread *mptLoadCarlaTopologyStatusThread = new thread(&LoadCarlaTopologyStatusMultiThread, vstrCarlaTopologyStatus, &qCarlaTopologyStatus);
     
     
     // // // 启动 XFeat 加载线程 (传入上面获取的 vstrXFeatCamXX)
@@ -565,17 +579,20 @@ int main(int argc, char **argv)
         vector<vector<vector<int>>> *pvKeyPoints ;
         vector<vector<vector<float>>> *pvDescriptor ;
         vector<LL_SLAM::ObjectObservation> *pvObjectObservations;
+        LL_SLAM::CarlaTopologyStatus *pCarlaTopologyStatus;
         while ( 1 ) {
             if (qpvImCams.size() > 0) {
                 pvImCams = qpvImCams.front();
                 pvKeyPoints = qpvKeyPoints.front();
                 pvDescriptor = qpvDescriptor.front();
                 pvObjectObservations = qpvObjectObservations.front();
+                pCarlaTopologyStatus = qpvCarlaTopologyStatus.front();
 
                 qpvImCams.pop();
                 qpvKeyPoints.pop();
                 qpvDescriptor.pop();
                 qpvObjectObservations.pop();
+                qpvCarlaTopologyStatus.pop();
                 break;
             } else {
                 // cout << "I am waiting for Inputs." << endl;
@@ -613,7 +630,7 @@ int main(int argc, char **argv)
         Sophus::SE3f Tcw_Sophus;//Tcw_Sophus =
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////
         //Eigen::Matrix4f Twb = SLAM.TrackMultiCamera(*pvImCams, tframe, {}, {});
-        Eigen::Matrix4f Twb = SLAM.TrackMultiCamera(*pvImCams, tframe, pvKeyPoints, pvDescriptor, pvObjectObservations);
+        Eigen::Matrix4f Twb = SLAM.TrackMultiCamera(*pvImCams, tframe, pvKeyPoints, pvDescriptor, pvObjectObservations, pCarlaTopologyStatus);
         //Eigen::Matrix4f Twb;
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -641,6 +658,7 @@ int main(int argc, char **argv)
              << "\033[0m" << endl;
         vector<LL_SLAM::ObjectObservation>().swap(*pvObjectObservations);
         delete pvObjectObservations;
+        delete pCarlaTopologyStatus;
 
 
 
@@ -962,6 +980,83 @@ void LoadObjectTrackMultiThread(vector<string> vstrObjectTrack, queue<vector<LL_
             {
                 unique_lock<mutex> lock(MutexMsg);
                 (*qObjectTrackxx).push(vObjects);
+            }
+        }
+    }
+}
+
+void LoadCarlaTopologyStatusPaths(const string &strPathToSequence, vector<string> &vstrCarlaTopologyStatus)
+{
+    vector<double> vTimestamps;
+    ifstream fTimes;
+    string strPathTimeFile = strPathToSequence + "/times.txt";
+    fTimes.open(strPathTimeFile.c_str());
+    while(!fTimes.eof())
+    {
+        string s;
+        getline(fTimes,s);
+        if(!s.empty())
+        {
+            stringstream ss;
+            ss << s;
+            double t;
+            ss >> t;
+            vTimestamps.push_back(t);
+        }
+    }
+
+    const int nTimes = vTimestamps.size();
+    vstrCarlaTopologyStatus.resize(nTimes);
+    const string statusDir = strPathToSequence + "/CarlaTopologyStatus/";
+    for (int i = 0; i < nTimes; i++)
+    {
+        stringstream ss;
+        ss << setfill('0') << setw(6) << i;
+        vstrCarlaTopologyStatus[i] = statusDir + ss.str() + ".bin";
+    }
+}
+
+void getCarlaTopologyStatus(const string &frameBinDir, LL_SLAM::CarlaTopologyStatus &status)
+{
+    status = LL_SLAM::CarlaTopologyStatus();
+    std::ifstream infile(frameBinDir.c_str(), std::ifstream::binary);
+    if (!infile.is_open()) {
+        return;
+    }
+
+    const int floatPerFrame = LL_SLAM::CarlaTopologyStatus::kNumFloatsPerFrame;
+    std::vector<float> fDataBuff(floatPerFrame, 0.0f);
+    infile.read(reinterpret_cast<char*>(&fDataBuff.front()), floatPerFrame * sizeof(float));
+    const std::streamsize readBytes = infile.gcount();
+    infile.close();
+
+    if (readBytes != floatPerFrame * static_cast<std::streamsize>(sizeof(float))) {
+        return;
+    }
+
+    status.road_id = int(fDataBuff[0]);
+    status.section_id = int(fDataBuff[1]);
+    status.lane_id = int(fDataBuff[2]);
+    status.junction_id = int(fDataBuff[3]);
+    status.is_junction = fDataBuff[4] > 0.5f;
+    status.junction_proximity_id = int(fDataBuff[5]);
+    status.next_junction_distance_m = fDataBuff[6];
+    status.valid = true;
+}
+
+void LoadCarlaTopologyStatusMultiThread(vector<string> vstrCarlaTopologyStatus, queue<LL_SLAM::CarlaTopologyStatus> *qCarlaTopologyStatusxx)
+{
+    int i = 0;
+    while (i < vstrCarlaTopologyStatus.size()) {
+        if ((*qCarlaTopologyStatusxx).size() >= nMaxQueueLen) {
+            usleep(2000);
+        } else {
+            LL_SLAM::CarlaTopologyStatus status;
+            getCarlaTopologyStatus(vstrCarlaTopologyStatus[i], status);
+            i++;
+            {
+                unique_lock<mutex> lock(MutexMsg);
+                (*qCarlaTopologyStatusxx).push(status);
             }
         }
     }
